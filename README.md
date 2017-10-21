@@ -1,38 +1,96 @@
-SmileMiner
-==========
+Smile
+=====
 
-SmileMiner (Statistical Machine Intelligence and Learning Engine) is a set of pure Java libraries of various state-of-art machine learning algorithms. SmileMiner is self contained and requires only Java standard library. The major components include
+[![Join the chat at https://gitter.im/haifengl/smile](https://badges.gitter.im/haifengl/smile.svg)](https://gitter.im/haifengl/smile?utm_source=badge&utm_medium=badge&utm_campaign=pr-badge&utm_content=badge) [![Maven Central](https://maven-badges.herokuapp.com/maven-central/com.github.haifengl/smile-core/badge.svg)](https://maven-badges.herokuapp.com/maven-central/com.github.haifengl/smile-core)
 
-* **Smile**
-The core machine learning library
-* **SmileMath**
-Mathematical functions (basic, special, kernel, distance, rbf, etc.), sorting, random number generators, optimization, linear algebra, statistical distributions, and hypothesis testing.
-* **SmileData**
-Parsers for arff, libsvm, delimited text, sparse matrix, microarray gene expression data.
-* **SmileGraph**
-Graph algorithms on adjacency list and matrix.
-* **SmileInterpolation**
-One and two dimensional interpolation.
-* **SmileNLP**
-Natural language processing.
-* **SmilePlot**
-Swing-based data visualization library.
+Smile (Statistical Machine Intelligence and Learning Engine) is
+a fast and comprehensive machine learning, NLP, linear algebra,
+graph, interpolation, and visualization system in Java and Scala.
+With advanced data structures and algorithms,
+Smile delivers state-of-art performance.
 
-SmileMiner is well documented and you can browse the <a href="http://haifengl.github.io/smile/doc/index.html">javadoc</a> for more information. Tutorials are available on the project <a href="http://github.com/haifengl/smile/wiki">wiki</a>. A basic tutorial is also included at the bottom of this file.
+Smile covers every aspect of machine learning, including classification,
+regression, clustering, association rule mining, feature selection,
+manifold learning, multidimensional scaling, genetic algorithms,
+missing value imputation, efficient nearest neighbor search, etc.
 
-To see SmileMiner in action, please download the <a href="http://haifengl.github.io/smile/smile-demo.jar">demo</a> jar file and then run <tt>java -jar smile-demo.jar</tt>.
+Smile is well documented and please check out the
+[project website](http://haifengl.github.io/smile/)
+for programming guides and more information.
 
 You can use the libraries through Maven central repository by adding the following to your project pom.xml file.
 ```
     <dependency>
       <groupId>com.github.haifengl</groupId>
       <artifactId>smile-core</artifactId>
-      <version>1.0.3</version>
+      <version>1.4.0</version>
     </dependency>
 ```
-You can similarily replace artifactId smile-core with smile-math, smile-data, smile-graph, smile-interpolation, smile-nlp, or smile-plot for other modules.
 
-SmileMiner implements the following major machine learning algorithms
+For NLP, use the artifactId smile-nlp.
+
+For Scala API, please use
+```
+    libraryDependencies += "com.github.haifengl" %% "smile-scala" % "1.4.0"
+```
+
+To enable machine optimized matrix computation, the users should add
+the dependency of smile-netlib:
+```
+    <dependency>
+      <groupId>com.github.haifengl</groupId>
+      <artifactId>smile-netlib</artifactId>
+      <version>1.4.0</version>
+    </dependency>
+```
+and also make their machine-optimized libblas3 (CBLAS) and liblapack3 (Fortran)
+available as shared libraries at runtime. This module employs the highly efficient
+[netlib-java](https://github.com/fommil/netlib-java#netlib-java) library.
+
+OS X
+----
+Apple OS X requires no further setup as it ships with the veclib framework.
+
+Linux
+-----
+Generically-tuned ATLAS and OpenBLAS are available with most distributions
+and must be enabled explicitly using the package-manager. For example,
+
+ - sudo apt-get install libatlas3-base libopenblas-base
+ - sudo update-alternatives --config libblas.so
+ - sudo update-alternatives --config libblas.so.3
+ - sudo update-alternatives --config liblapack.so
+ - sudo update-alternatives --config liblapack.so.3
+
+However, these are only generic pre-tuned builds. If you have an Intel MKL licence,
+you could also create symbolic links from libblas.so.3 and liblapack.so.3 to libmkl_rt.so
+or use Debian's alternatives system.
+
+Windows
+-------
+The native_system builds expect to find libblas3.dll and liblapack3.dll
+on the %PATH% (or current working directory). Smile ships a prebuilt
+[OpenBLAS](http://www.openblas.net/).
+The users can also install vendor-supplied implementations, which may
+offer better performance.
+
+Smile comes with an interactive shell. Download pre-packaged Smile from the [releases page](https://github.com/haifengl/smile/releases).
+In the home directory of Smile, type
+```
+    ./bin/smile
+```
+to enter the shell, which is based on Scala interpreter. So you can run any valid Scala expressions in the shell.
+In the simplest case, you can use it as a calculator. Besides, all high-level Smile operators are predefined
+in the shell. By default, the shell uses up to 4GB memory. If you need more memory to handle large data,
+use the option `-J-Xmx`. For example,
+
+```
+    ./bin/smile -J-Xmx8192M
+```
+You can also modify the configuration file `./conf/application.ini` for the memory and other JVM settings.
+For detailed help, checkout the [project website](http://haifengl.github.io/smile/).
+
+Smile implements the following major machine learning algorithms:
 
 * **Classification**
 Support Vector Machines, Decision Trees, AdaBoost, Gradient Boosting, Random Forest, Logistic Regression, Neural Networks, RBF Networks, Maximum Entropy Classifier, KNN, Naïve Bayesian, Fisher/Linear/Quadratic/Regularized Discriminant Analysis.
@@ -50,7 +108,7 @@ BIRCH, CLARANS, DBScan, DENCLUE, Deterministic Annealing, K-Means, X-Means, G-Me
 FP-growth mining algorithm
 
 * **Manifold learning**
-IsoMap, LLE, Laplacian Eigenmap, PCA, Kernel PCA, Probabilistic PCA, GHA, Random Projection
+IsoMap, LLE, Laplacian Eigenmap, t-SNE, PCA, Kernel PCA, Probabilistic PCA, GHA, Random Projection
 
 * **Multi-Dimensional Scaling**
 Classical MDS, Isotonic MDS, Sammon Mapping
@@ -66,12 +124,20 @@ Sentence Splitter and Tokenizer, Bigram Statistical Test, Phrase Extractor, Keyw
 
 Model Serialization
 ===================
-You may notice that none of models supports Java Serializable interface. It is because the exact format is hard to keep stable, class changes can easily make your serialized data unreadable, reading/writing the data in non-Java code is almost impossible. Currently, we suggest <a href="http://xstream.codehaus.org">XStream</a> to serialize the trained models. XStream is a simple library to serialize objects to XML and back again. XStream is easy to use and doesn't require mappings (actually requires no modifications to objects). <a href="http://code.google.com/p/protostuff/">Protostuff</a> is a nice alternative that supports forward-backward compatibility (schema evolution) and validation. Beyond XML, Protostuff supports many other formats such as JSON, YAML, protobuf, etc. For some predicitive models, we look forward to supporting PMML (Predictive Model Markup Language), an XML-based file format developed by the Data Mining Group.
+Most models support the Java `Serializable` interface (all classifiers do support `Serializable` interface) so that
+you can use them in Spark. For reading/writing the models in non-Java code, we suggest [XStream](http://xstream.codehaus.org) to serialize the trained models.
+XStream is a simple library to serialize objects to XML and back again. XStream is easy to use and doesn't require mappings
+(actually requires no modifications to objects). [Protostuff](http://code.google.com/p/protostuff/) is a
+nice alternative that supports forward-backward compatibility (schema evolution) and validation.
+Beyond XML, Protostuff supports many other formats such as JSON, YAML, protobuf, etc. For some predictive models,
+we look forward to supporting PMML (Predictive Model Markup Language), an XML-based file format developed by the Data Mining Group.
+
+Smile Scala API provides `read()`, `read.xstream()`, `write()`, and `write.xstream()` functions in package smile.io.
 
 SmilePlot
 =========
 
-SmileMiner also has a Swing-based data visualization library SmilePlot, which provides scatter plot, line plot, staircase plot, bar plot, box plot, histogram, 3D histogram, dendrogram, heatmap, hexmap, QQ plot, contour plot, surface, and wireframe. The class PlotCanvas provides builtin functions such as zoom in/out, export, print, customization, etc.
+Smile also has a Swing-based data visualization library SmilePlot, which provides scatter plot, line plot, staircase plot, bar plot, box plot, histogram, 3D histogram, dendrogram, heatmap, hexmap, QQ plot, contour plot, surface, and wireframe. The class PlotCanvas provides builtin functions such as zoom in/out, export, print, customization, etc.
 
 SmilePlot requires SwingX library for JXTable. But if your environment cannot use SwingX, it is easy to remove this dependency by using JTable.
 
@@ -80,136 +146,145 @@ To use SmilePlot, add the following to dependencies
     <dependency>
       <groupId>com.github.haifengl</groupId>
       <artifactId>smile-plot</artifactId>
-      <version>1.0.2</version>
+      <version>1.4.0</version>
     </dependency>
 ```
 
 Demo Gallery
 ============
-<table class="center">
-  <tr>
-    <td>
-      <figure>
-        <a href="http://haifengl.github.io/smile/gallery/smile-demo-kpca.png"><img src="http://haifengl.github.io/smile/gallery/smile-demo-kpca-small.png" alt="Kernel PCA" width="100%"></a>
-        <figcaption>Kernel PCA</figcaption>
-      </figure>
-    </td>
-    <td>
-      <figure>
-        <a href="http://haifengl.github.io/smile/gallery/smile-demo-isomap.png"><img src="http://haifengl.github.io/smile/gallery/smile-demo-isomap-small.png" alt="IsoMap" width="100%"></a>
-        <figcaption>IsoMap</figcaption>
-      </figure>
-    </td>
-  </tr>
-  <tr>
-    <td>
-      <figure>
-        <a href="http://haifengl.github.io/smile/gallery/smile-demo-mds.png"><img src="http://haifengl.github.io/smile/gallery/smile-demo-mds-small.png" alt="MDS" width="100%"></a>
-        <figcaption>Multi-Dimensional Scaling</figcaption>
-      </figure>
-    </td>
-    <td>
-      <figure>
-        <a href="http://haifengl.github.io/smile/gallery/smile-demo-som.png"><img src="http://haifengl.github.io/smile/gallery/smile-demo-som-small.png" alt="SOM" width="100%"></a>
-        <figcaption>SOM</figcaption>
-      </figure>
-    </td>
-  </tr>
-  <tr>
-    <td>
-      <figure>
-        <a href="http://haifengl.github.io/smile/gallery/smile-demo-ann.png"><img src="http://haifengl.github.io/smile/gallery/smile-demo-ann-small.png" alt="Neural Network" width="100%"></a>
-        <figcaption>Neural Network</figcaption>
-      </figure>
-    </td>
-    <td>
-      <figure>
-        <a href="http://haifengl.github.io/smile/gallery/smile-demo-svm.png"><img src="http://haifengl.github.io/smile/gallery/smile-demo-svm-small.png" alt="SVM" width="100%"></a>
-        <figcaption>SVM</figcaption>
-      </figure>
-    </td>
-  </tr>
-  <tr>
-    <td>
-      <figure>
-        <a href="http://haifengl.github.io/smile/gallery/smile-demo-agglomerative-clustering.png"><img src="http://haifengl.github.io/smile/gallery/smile-demo-agglomerative-clustering-small.png" alt="Agglomerative Clustering" width="100%"></a>
-        <figcaption>Agglomerative Clustering</figcaption>
-      </figure>
-    </td>
-    <td>
-      <figure>
-        <a href="http://haifengl.github.io/smile/gallery/smile-demo-xmeans.png"><img src="http://haifengl.github.io/smile/gallery/smile-demo-xmeans-small.png" alt="X-Means" width="100%"></a>
-        <figcaption>X-Means</figcaption>
-      </figure>
-    </td>
-  </tr>
-  <tr>
-    <td>
-      <figure>
-        <a href="http://haifengl.github.io/smile/gallery/smile-demo-dbscan.png"><img src="http://haifengl.github.io/smile/gallery/smile-demo-dbscan-small.png" alt="DBScan" width="100%"></a>
-        <figcaption>DBScan</figcaption>
-      </figure>
-    </td>
-    <td>
-      <figure>
-        <a href="http://haifengl.github.io/smile/gallery/smile-demo-neural-gas.png"><img src="http://haifengl.github.io/smile/gallery/smile-demo-neural-gas-small.png" alt="Neural Gas" width="100%"></a>
-        <figcaption>Neural Gas</figcaption>
-      </figure>
-    </td>
-  </tr>
-  <tr>
-    <td>
-      <figure>
-        <a href="http://haifengl.github.io/smile/gallery/smile-demo-wavelet.png"><img src="http://haifengl.github.io/smile/gallery/smile-demo-wavelet-small.png" alt="Wavelet" width="100%"></a>
-        <figcaption>Wavelet</figcaption>
-      </figure>
-    </td>
-    <td>
-      <figure>
-        <a href="http://haifengl.github.io/smile/gallery/smile-demo-mixture.png"><img src="http://haifengl.github.io/smile/gallery/smile-demo-mixture-small.png" alt="Mixture" width="100%"></a>
-        <figcaption>Exponential Family Mixture</figcaption>
-      </figure>
-    </td>
-  </tr>
+<table class="center" width="100%">
+    <tr>
+        <td width="50%">
+            <figure>
+                <a href="http://haifengl.github.io/smile/gallery/smile-demo-kpca.png"><img src="http://haifengl.github.io/smile/gallery/smile-demo-kpca-small.png" alt="Kernel PCA"></a>
+                <figcaption><h2>Kernel PCA</h2></figcaption>
+            </figure>
+        </td>
+        <td width="50%">
+            <figure>
+                <a href="http://haifengl.github.io/smile/gallery/smile-demo-isomap.png"><img src="http://haifengl.github.io/smile/gallery/smile-demo-isomap-small.png" alt="IsoMap"></a>
+                <figcaption><h2>IsoMap</h2></figcaption>
+            </figure>
+        </td>
+    </tr>
+    <tr>
+        <td width="50%">
+            <figure>
+                <a href="http://haifengl.github.io/smile/gallery/smile-demo-mds.png"><img src="http://haifengl.github.io/smile/gallery/smile-demo-mds-small.png" alt="MDS"></a>
+                <figcaption><h2>Multi-Dimensional Scaling</h2></figcaption>
+            </figure>
+        </td>
+        <td width="50%">
+            <figure>
+                <a href="http://haifengl.github.io/smile/gallery/smile-demo-som.png"><img src="http://haifengl.github.io/smile/gallery/smile-demo-som-small.png" alt="SOM"></a>
+                <figcaption><h2>SOM</h2></figcaption>
+            </figure>
+        </td>
+    </tr>
+    <tr>
+        <td width="50%">
+            <figure>
+                <a href="http://haifengl.github.io/smile/gallery/smile-demo-ann.png"><img src="http://haifengl.github.io/smile/gallery/smile-demo-ann-small.png" alt="Neural Network"></a>
+                <figcaption><h2>Neural Network</h2></figcaption>
+            </figure>
+        </td>
+        <td width="50%">
+            <figure>
+                <a href="http://haifengl.github.io/smile/gallery/smile-demo-svm.png"><img src="http://haifengl.github.io/smile/gallery/smile-demo-svm-small.png" alt="SVM"></a>
+                <figcaption><h2>SVM</h2></figcaption>
+            </figure>
+        </td>
+    </tr>
+    <tr>
+        <td width="50%">
+            <figure>
+                <a href="http://haifengl.github.io/smile/gallery/smile-demo-agglomerative-clustering.png"><img src="http://haifengl.github.io/smile/gallery/smile-demo-agglomerative-clustering-small.png" alt="Agglomerative Clustering"></a>
+                <figcaption><h2>Agglomerative Clustering</h2></figcaption>
+            </figure>
+        </td>
+        <td width="50%">
+            <figure>
+                <a href="http://haifengl.github.io/smile/gallery/smile-demo-xmeans.png"><img src="http://haifengl.github.io/smile/gallery/smile-demo-xmeans-small.png" alt="X-Means"></a>
+                <figcaption><h2>X-Means</h2></figcaption>
+            </figure>
+        </td>
+    </tr>
+    <tr>
+        <td width="50%">
+            <figure>
+                <a href="http://haifengl.github.io/smile/gallery/smile-demo-dbscan.png"><img src="http://haifengl.github.io/smile/gallery/smile-demo-dbscan-small.png" alt="DBScan"></a>
+                <figcaption><h2>DBScan</h2></figcaption>
+            </figure>
+        </td>
+        <td width="50%">
+            <figure>
+                <a href="http://haifengl.github.io/smile/gallery/smile-demo-neural-gas.png"><img src="http://haifengl.github.io/smile/gallery/smile-demo-neural-gas-small.png" alt="Neural Gas"></a>
+                <figcaption><h2>Neural Gas</h2></figcaption>
+            </figure>
+        </td>
+    </tr>
+    <tr>
+        <td width="50%">
+            <figure>
+                <a href="http://haifengl.github.io/smile/gallery/smile-demo-wavelet.png"><img src="http://haifengl.github.io/smile/gallery/smile-demo-wavelet-small.png" alt="Wavelet"></a>
+                <figcaption><h2>Wavelet</h2></figcaption>
+            </figure>
+        </td>
+        <td width="50%">
+            <figure>
+                <a href="http://haifengl.github.io/smile/gallery/smile-demo-mixture.png"><img src="http://haifengl.github.io/smile/gallery/smile-demo-mixture-small.png" alt="Mixture"></a>
+                <figcaption><h2>Exponential Family Mixture</h2></figcaption>
+            </figure>
+        </td>
+    </tr>
 </table>
 
 Tutorial
 ========
-This tutorial shows how to use SmileMiner for predictive modeling (classification and regression) from Java code. It includes loading data, training and testing the model, and applying the model.
+This tutorial shows how to use the Smile Java API for predictive modeling
+(classification and regression). It includes loading data, training
+and testing the model, and applying the model. If you use Scala, we
+strongly recommend the new high level Scala API, which is similar to
+R and Matlab. The programming guide with Scala API is available at
+[project website](http://haifengl.github.io/smile/).
 
 ## Load Data
-Most SmileMiner algorithms take simple double[] as input. So you can use your favorite methods or library to import the data as long as the samples are in double arrays. To make the life easier, SmileMiner does provide a couple of parsers for popular data formats, such as Weka's ARFF files, LibSVM's file format, delimited text files, and binary sparse data. These classes are in the package smile.data.parser. The package smile.data.parser.microarray also provides several parsers for microarray gene expression datasets, including GCT, PCL, RES, and TXT files. In the following example, we use the ARFF parser to load the weather dataset:
+Most Smile algorithms take simple double[] as input so you can use your favorite methods or library to import the data as long as the samples are in double arrays. To make life easier, Smile does provide a couple of parsers for popular data formats, such as Weka's ARFF files, LibSVM's file format, delimited text files, and binary sparse data. These classes are in the package smile.data.parser. The package smile.data.parser.microarray also provides several parsers for microarray gene expression datasets, including GCT, PCL, RES, and TXT files. In the following example, we use the ARFF parser to load the weather dataset:
 ```java
 ArffParser arffParser = new ArffParser();
 arffParser.setResponseIndex(4);
-AttributeDataset weather = arffParser.parse(this.getClass().getResourceAsStream("/smile/data/weka/weather.nominal.arff"));
+AttributeDataset weather = arffParser.parse(new FileInputStream("data/weka/weather.nominal.arff"));
 double[][] x = weather.toArray(new double[weather.size()][]);
 int[] y = weather.toArray(new int[weather.size()]);
 ```
-Note that the data file weather.nominal.arff is not included in the release. To try out the example, please just download any arff file from Internet. In the second line, we use setResponseIndex to set the column index (starting at 0) of dependent/response variable. In supervised learning, we need a response variable for each sample to train the model. Basically, it is the _y_ in the mathematical model. For classification, it is the class label. For regression, it is of real value. Without setting it, the data assume no response variable. In that case, the data can be used for testing or unsupervised learning.
+Note that the data file weather.nominal.arff is in Smile distribution package.
+After unpacking the package, there is a lot of testing data in the directory of
+`$smile/data`, where `$smile` is the the root of Smile package.
 
-The parse method can take a URI, File, path string, or InputStream as input argument. And it returns an AttributeDataset object, which is a dataset of a number of attributes. All attribute values are stored as double even if the attribute may be nominal, ordinal, string, or date. The first call of toArray taking a double[][] argument fills the array with all the parsed data and returns it, of which each row is a sample/object. The second call of toArray taking an int array fills it with the class labels of the samples and then returns it.
+In the second line, we use `setResponseIndex` to set the column index (starting at 0) of the dependent/response variable. In supervised learning, we need a response variable for each sample to train the model. Basically, it is the _y_ in the mathematical model. For classification, it is the class label. For regression, it is of real value. Without setting it, the data assumes no response variable. In that case, the data can be used for testing or unsupervised learning.
 
-The AttributeDataset.attributes method returns the list of Attribute objects in the dataset. The Attribute object contains the type information (and optional weight), which is needed in some algorithms (e.g. decision trees). The Attribute object also contain variable name and description, which are useful in the output or UI.
+The parse method can take a `URI`, `File`, path string, or `InputStream` as an input argument. And it returns an `AttributeDataset` object, which is a dataset of a number of attributes. All attribute values are stored as double even if the attribute may be nominal, ordinal, string, or date. The first call of `toArray` taking a `double[][]` argument fills the array with all the parsed data and returns it, of which each row is a sample/object. The second call of `toArray` taking an int array fills it with the class labels of the samples and then returns it.
 
-Similar to ArffParser, we can also use the DelimitedTextParser class to parse plain delimited text files. By default, the parser expects a white-space-separated-values file. Each line in the file corresponds to a row in the table. Within a line, fields are separated by white spaces, each field belonging to one table column. This class can also be used to read other text tabular files by setting delimiter character such ash ','. The file may contain comment lines (starting with '%') and missing values (indicated by placeholder '?'), which both can be parameterized.
+The `AttributeDataset.attributes` method returns the list of `Attribute` objects in the dataset. The `Attribute` object contains the type information (and optional weight), which is needed in some algorithms (e.g. decision trees). The `Attribute` object also contains variable name and description, which are useful in the output or UI.
+
+Similar to `ArffParser`, we can also use the `DelimitedTextParser` class to parse plain delimited text files. By default, the parser expects a white-space-separated-values file. Each line in the file corresponds to a row in the table. Within a line, fields are separated by white spaces, each field belonging to one table column. This class can also be used to read other text tabular files by setting the delimiter character such as ','. The file may contain comment lines (starting with '%') and missing values (indicated by placeholder '?'), which can both be parameterized.
 ```java
 DelimitedTextParser parser = new DelimitedTextParser();
 parser.setResponseIndex(new NominalAttribute("class"), 0);
-AttributeDataset usps = parser.parse("USPS Train", this.getClass().getResourceAsStream("/smile/data/usps/zip.train"));
+AttributeDataset usps = parser.parse("USPS Train", new FileInputStream("data/usps/zip.train"));
 ```
-where the setResponseIndex also take an extra parameter about the attribute of response variable. Because this is a classification problem, we set it a NominalAttribute with name "class". In case of regression, we should use NumericAttribute instead.
+where the `setResponseIndex` also takes an extra parameter about the attribute of the response variable. Because this is a classification problem, we set it to a `NominalAttribute` with name "class". In case of regression, we should use `NumericAttribute` instead.
 
-If your input data contains different types of attributes (e.g. NumericAttribute, NominalAttribute, StringAttribute, DateAttribute, etc), you should pass an array of Attribute[] to the constructor of DelimitedTextParser to indicate the data types of each column. By default, DelimitedTextParser assumes all columns as NumericAttribute.
+If your input data contains different types of attributes (e.g. `NumericAttribute`, `NominalAttribute`, `StringAttribute`, `DateAttribute`, etc), you should pass an array of `Attribute[]` to the constructor of `DelimitedTextParser` to indicate the data types of each column. By default, `DelimitedTextParser` assumes all columns as `NumericAttribute`.
 
 ## Train The Model
-SmileMiner implements a variety of classification and regression algorithms. In what follows, we train a support vector machine (SVM) on the USPS zip code handwriting dataset. The SVM employs a Gaussian kernel and one-to-one strategy as this is a multi-class problem. Different from LibSVM or other popular SVM library, SmileMiner implements an online learning algorithm for training SVM. The method learn trains the SVM with the given dataset for one epoch. The caller may call this method multiple times to obtain better accuracy although one epoch is usually sufficient. Note that after calling learn, we need to call the finish method, which processes support vectors until converge. As it is an online algorithm, the user may update the model anytime by calling learn even after calling the finish method. In the example, we show another way of learning by working on single sample. As shown in the example, we simply call the predict method on a testing sample. Both learn and predict methods are generic for all classification and regression algorithms. 
+Smile implements a variety of classification and regression algorithms. In what follows, we train a support vector machine (SVM) on the USPS zip code handwriting dataset. The SVM employs a Gaussian kernel and one-to-one strategy as this is a multi-class problem. Different from LibSVM or other popular SVM library, Smile implements an online learning algorithm for training SVM. The method `learn` trains the SVM with the given dataset for one epoch. The caller may call this method multiple times to obtain better accuracy although one epoch is usually sufficient. Note that after calling `learn`, we need to call the `finish` method, which processes support vectors until they converge. As it is an online algorithm, the user may update the model anytime by calling `learn` even after calling the `finish` method. In the example, we show another way of learning by working on single sample. As shown in the example, we simply call the `predict` method on a testing sample. Both `learn` and `predict` methods are generic for all classification and regression algorithms.
 ```java
 DelimitedTextParser parser = new DelimitedTextParser();
 parser.setResponseIndex(new NominalAttribute("class"), 0);
 try {
-    AttributeDataset train = parser.parse("USPS Train", this.getClass().getResourceAsStream("/smile/data/usps/zip.train"));
-    AttributeDataset test = parser.parse("USPS Test", this.getClass().getResourceAsStream("/smile/data/usps/zip.test"));
+    AttributeDataset train = parser.parse("USPS Train", new FileInputStream("/data/usps/zip.train"));
+    AttributeDataset test = parser.parse("USPS Test", new FileInputStream("/data/usps/zip.test"));
 
     double[][] x = train.toArray(new double[train.size()][]);
     int[] y = train.toArray(new int[train.size()]);
@@ -248,20 +323,20 @@ try {
     System.err.println(ex);
 }
 ```
-As aforementioned, tree base methods need the type information of attributes. In the next example, we train an AdaBoost model on the weather dataset.
+As aforementioned, tree based methods need the type information of attributes. In the next example, we train an `AdaBoost` model on the weather dataset.
 ```java
 ArffParser arffParser = new ArffParser();
 arffParser.setResponseIndex(4);
-AttributeDataset weather = arffParser.parse(this.getClass().getResourceAsStream("/smile/data/weka/weather.nominal.arff"));
+AttributeDataset weather = arffParser.parse(new FileInputStream("/data/weka/weather.nominal.arff"));
 double[][] x = weather.toArray(new double[weather.size()][]);
 int[] y = weather.toArray(new int[weather.size()]);
 
 AdaBoost forest = new AdaBoost(weather.attributes(), x, y, 200, 4);
 ```
-In the example, we set the number of trees as 200 and the maximum number of leaf nodes in the trees as 4, which works as a regularization control.
+In the example, we set the number of trees to 200 and the maximum number of leaf nodes in the trees to 4, which works as a regularization control.
 
 ## Model Validation
-In the example of USPS, we have both train and test datasets. However, we frequently have only a single dataset for building model. For model validation, SmileMiner provide LOOCV (leave-one-out cross validation), cross validation, and bootstrap in the package smile.validation. Besides, the package also has various measures to evaluate classification, regression, and clustering. For example, we have accuracy, fallout, FDR, F-measure (F1 score or F-score), precision, recall, sensitivity, specificity for classification; absolute deviation, MSE, RMSE, RSS for regression; rand index, adjust rand index for clustering. The following is an example how to use LOOCV.
+In the example of USPS, we have both training and test datasets. However, we frequently have only a single dataset for building models. For model validation, Smile provide LOOCV (leave-one-out cross validation), cross validation, and bootstrap in the package smile.validation. Additionally, the package also has various measures to evaluate classification, regression, and clustering. For example, we have accuracy, fallout, FDR, F-measure (F1 score or F-score), precision, recall, sensitivity, specificity for classification; absolute deviation, MSE, RMSE, RSS for regression; rand index, adjust rand index for clustering. The following is an example how to use LOOCV.
 ```java
 double[][] x = weather.toArray(new double[weather.size()][]);
 int[] y = weather.toArray(new int[weather.size()]);
@@ -282,11 +357,11 @@ System.out.println("Decision Tree error = " + error);
 ```
 
 ## Use The Trained Model
-All classifiers in SmileMiner implements the following interface.
+All classifiers in Smile implement the following interface.
 ```java
 public interface Classifier<T> {
     public int predict(T x);
     public int predict(T x, double[] posteriori);
 }
 ```
-To use the trained model, we can apply the method predict on a new sample. Besides just returning class label, many methods (e.g. neural networks) can also output the posteriori probabilities of each class. 
+To use the trained model, we can apply the method `predict` on a new sample. Besides just returning the class label, many methods (e.g. neural networks) can also output the posteriori probabilities of each class. 
