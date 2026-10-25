@@ -1,19 +1,113 @@
+# Smile Studio
+/.smile/
+/log/
+
+# Agent tool workspace
+.playwright-cli/
+
+# JDTLS (or Eclipse JDT)
+bin/
+!/bin/
+!/studio/src/universal/bin/
+
+# Secrets
+.certs/
+.env*
+*.cer
+*.key
+*.pem
+*.p12
+*.pfx
+*.jks
+*.keystore
+
+# Agent scratch state
+/docs
+
+# Class and package files
 *.class
-
-# Demo program
-SmileDemo/src/main/resources
-SmileTestData
-
-# javadoc
-doc/
-
-# Mobile Tools for Java (J2ME)
-.mtj.tmp/
-
-# Package Files #
 *.jar
 *.war
 *.ear
 
-# virtual machine crash logs, see http://www.java.com/en/download/help/error_hotspot.xml
+# JVM crash logs, see http://www.java.com/en/download/help/error_hotspot.xml
 hs_err_pid*
+
+# Test data
+/data
+/model
+**/*.db
+
+# LibTorch library
+/deep/libtorch
+
+# Bundled JetBrains Runtime (Windows x86-64), a Studio release input.
+# studio/build.sbt sets JAVA_HOME=%APP_HOME%\jbr for the Windows launcher;
+# it is not built or downloaded by anything here, so do not commit it.
+/studio/src/universal/jbr
+/studio/src/universal/jdtls
+
+# Clojure
+.nrepl-port
+.lein-repl-*
+clojure/pom.xml*
+clojure/.lein-failures
+
+# Node.js
+node_modules
+
+# PyTorch checkpoints
+*.pt
+
+# Jupyter
+.ipynb_checkpoints
+
+# macOS
+.DS_Store
+
+# Generated
+/serve/src/main/resources/META-INF/resources/
+/serve/src/main/webui/dist/
+
+# SBT
+.bsp
+**/target
+
+# Gradle
+.gradle/
+build/
+
+# Eclipse
+.project
+.classpath
+.settings/
+.cache-main
+.cache-tests
+
+# IntelliJ
+.idea
+*.ipr
+*.iml
+*.iws
+
+# NetBeans
+nbproject
+nb-configuration.xml
+
+# Visual Studio Code
+.vscode
+.factorypath
+
+# Vim
+*.swp
+*.swo
+
+# patch
+*.orig
+*.rej
+
+# Python virtual environment
+venv
+
+# Plugin directory
+/.quarkus/cli/plugins/

@@ -1,0 +1,446 @@
+/*
+ * Copyright (c) 2026 Haifeng Li. All rights reserved.
+ *
+ * SPDX-License-Identifier: BUSL-1.1
+ *
+ * This software is licensed under the Business Source License version 1.1 (BSL 1.1).
+ * Use of this work is governed by the BSL 1.1 terms and conditions set forth in
+ * the studio/LICENSE file (or LICENSE file in standalone distributions) and at
+ * https://mariadb.com/bsl11.
+ *
+ * Use of this work is strictly for evaluation and/or non-production purposes.
+ * For commercial production use, please contact sales@aihalo.dev.
+ *
+ * Effective on the Change Date (four years from the first publication of this
+ * version), this file automatically converts to the GNU Affero General Public
+ * License version 3.0 (AGPLv3) or later.
+ */
+package smile.shell;
+
+import java.io.*;
+import java.nio.file.*;
+import org.junit.jupiter.api.*;
+import picocli.CommandLine;
+import smile.math.MathEx;
+import static org.junit.jupiter.api.Assertions.*;
+
+/**
+ * Integration tests for the {@code smile predict} CLI command.
+ *
+ * <p>The strategy is:
+ * <ol>
+ *   <li>Train a model with {@link Train} (via picocli) to create a {@code .sml} file.</li>
+ *   <li>Run {@link Predict} on the same data file and assert output lines.</li>
+ * </ol>
+ *
+ * @author Haifeng Li
+ */
+public class PredictTest {
+
+    private Path tempDir;
+    private PrintStream originalOut;
+    private PrintStream originalErr;
+    private ByteArrayOutputStream outCapture;
+    private ByteArrayOutputStream errCapture;
+
+    /** ARFF file with the iris dataset (150 rows, "class" as response). */
+    private static final Path IRIS_ARFF = Path.of("base/src/test/resources/data/weka/iris.arff");
+    /** ARFF file for regression (Longley, 16 rows). */
+    private static final Path LONGLEY_ARFF = Path.of("base/src/test/resources/data/weka/regression/longley.arff");
+
+    @BeforeAll
+    public static void setUpClass() {
+        MathEx.setSeed(19650218);
+    }
+
+    @AfterAll
+    public static void tearDownClass() {
+    }
+
+    @BeforeEach
+    public void setUp() throws Exception {
+        tempDir = Files.createTempDirectory("smile-predict-test");
+        originalOut = System.out;
+        originalErr = System.err;
+        outCapture = new ByteArrayOutputStream();
+        errCapture = new ByteArrayOutputStream();
+        System.setOut(new PrintStream(outCapture));
+        System.setErr(new PrintStream(errCapture));
+    }
+
+    @AfterEach
+    public void tearDown() throws Exception {
+        System.setOut(originalOut);
+        System.setErr(originalErr);
+        try (var walk = Files.walk(tempDir)) {
+            walk.sorted(java.util.Comparator.reverseOrder())
+                .map(Path::toFile)
+                .forEach(File::delete);
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Helper: train a model and return its path
+    // ------------------------------------------------------------------
+
+    private Path trainClassifier(String... subCmdAndArgs) throws Exception {
+        Path modelFile = tempDir.resolve("model.sml");
+        String[] head = {"-d", IRIS_ARFF.toString(), "-m", modelFile.toString()};
+        String[] full = new String[head.length + subCmdAndArgs.length];
+        System.arraycopy(head, 0, full, 0, head.length);
+        System.arraycopy(subCmdAndArgs, 0, full, head.length, subCmdAndArgs.length);
+        int exit = new CommandLine(new Train()).execute(full);
+        assertEquals(0, exit, "Training should succeed");
+        return modelFile;
+    }
+
+    private Path trainRegressor(String... subCmdAndArgs) throws Exception {
+        Path modelFile = tempDir.resolve("model.sml");
+        String[] head = {"-d", LONGLEY_ARFF.toString(), "--formula", "employed ~ .", "-m", modelFile.toString()};
+        String[] full = new String[head.length + subCmdAndArgs.length];
+        System.arraycopy(head, 0, full, 0, head.length);
+        System.arraycopy(subCmdAndArgs, 0, full, head.length, subCmdAndArgs.length);
+        int exit = new CommandLine(new Train()).execute(full);
+        assertEquals(0, exit, "Training should succeed");
+        return modelFile;
+    }
+
+    // ------------------------------------------------------------------
+    // Classification prediction
+    // ------------------------------------------------------------------
+
+    @Test
+    public void testPredictClassificationProducesOneLabelPerRow() throws Exception {
+        System.out.println("Predict classification: one label per input row");
+        Path model = trainClassifier("random-forest", "--trees", "50");
+
+        // Reset capture after training
+        outCapture.reset();
+
+        int exit = new CommandLine(new Predict()).execute(
+            IRIS_ARFF.toString(), "--model", model.toString()
+        );
+        assertEquals(0, exit, "Expected exit code 0");
+
+        String[] lines = outCapture.toString().trim().split("\\r?\\n");
+        // iris.arff has 150 rows → 150 prediction lines
+        assertEquals(150, lines.length,
+                "Should produce exactly 150 prediction lines, got " + lines.length);
+    }
+
+    @Test
+    public void testPredictClassificationLabelsAreNonEmpty() throws Exception {
+        System.out.println("Predict classification: labels are non-empty strings");
+        Path model = trainClassifier("random-forest", "--trees", "50");
+        outCapture.reset();
+
+        new CommandLine(new Predict()).execute(
+            IRIS_ARFF.toString(), "--model", model.toString()
+        );
+
+        for (String line : outCapture.toString().trim().split("\\r?\\n")) {
+            assertFalse(line.isBlank(), "Each prediction line must not be blank");
+        }
+    }
+
+    @Test
+    public void testPredictClassificationWithProbability() throws Exception {
+        System.out.println("Predict classification: --probability flag appends class probabilities");
+        Path model = trainClassifier("random-forest", "--trees", "50");
+        outCapture.reset();
+
+        int exit = new CommandLine(new Predict()).execute(
+            IRIS_ARFF.toString(), "--model", model.toString(), "--probability"
+        );
+        assertEquals(0, exit);
+
+        String[] lines = outCapture.toString().trim().split("\\r?\\n");
+        assertEquals(150, lines.length, "Should still produce 150 lines");
+        // With probabilities each line has: <label> <p0> <p1> <p2>
+        // Check at least one space (more than just the label) in every line.
+        for (String line : lines) {
+            assertTrue(line.contains(" "),
+                    "Probability output should contain spaces: " + line);
+        }
+    }
+
+    @Test
+    public void testPredictLdaClassification() throws Exception {
+        System.out.println("Predict LDA classification");
+        Path model = trainClassifier("lda");
+        outCapture.reset();
+
+        int exit = new CommandLine(new Predict()).execute(
+            IRIS_ARFF.toString(), "--model", model.toString()
+        );
+        assertEquals(0, exit);
+        String[] lines = outCapture.toString().trim().split("\\r?\\n");
+        assertEquals(150, lines.length);
+    }
+
+    // ------------------------------------------------------------------
+    // Regression prediction
+    // ------------------------------------------------------------------
+
+    @Test
+    public void testPredictRegressionProducesOneValuePerRow() throws Exception {
+        System.out.println("Predict regression: one numeric value per row");
+        Path model = trainRegressor("ols");
+        outCapture.reset();
+
+        int exit = new CommandLine(new Predict()).execute(
+            LONGLEY_ARFF.toString(), "--model", model.toString()
+        );
+        assertEquals(0, exit);
+
+        String[] lines = outCapture.toString().trim().split("\\r?\\n");
+        // longley.arff has 16 rows
+        assertEquals(16, lines.length,
+                "Should produce 16 prediction lines, got " + lines.length);
+    }
+
+    @Test
+    public void testPredictRegressionValuesAreNumeric() throws Exception {
+        System.out.println("Predict regression: output values are numeric");
+        Path model = trainRegressor("ols");
+        outCapture.reset();
+
+        new CommandLine(new Predict()).execute(
+            LONGLEY_ARFF.toString(), "--model", model.toString()
+        );
+
+        for (String line : outCapture.toString().trim().split("\\r?\\n")) {
+            assertDoesNotThrow(() -> Double.parseDouble(line.trim()),
+                    "Each prediction line should be a parseable double: " + line);
+        }
+    }
+
+    @Test
+    public void testPredictRidgeRegression() throws Exception {
+        System.out.println("Predict Ridge regression");
+        Path model = trainRegressor("ridge", "--lambda", "0.1");
+        outCapture.reset();
+
+        int exit = new CommandLine(new Predict()).execute(
+            LONGLEY_ARFF.toString(), "--model", model.toString()
+        );
+        assertEquals(0, exit);
+        String[] lines = outCapture.toString().trim().split("\\r?\\n");
+        assertEquals(16, lines.length);
+    }
+
+    // ------------------------------------------------------------------
+    // JSON and Explainability output
+    // ------------------------------------------------------------------
+
+    @Test
+    public void testPredictWithJsonFlag() throws Exception {
+        System.out.println("Predict: --json flag produces JSON lines");
+        Path model = trainClassifier("random-forest", "--trees", "10");
+        outCapture.reset();
+
+        int exit = new CommandLine(new Predict()).execute(
+            IRIS_ARFF.toString(), "--model", model.toString(), "--json"
+        );
+        assertEquals(0, exit);
+
+        String[] lines = outCapture.toString().trim().split("\\r?\\n");
+        assertEquals(150, lines.length);
+        for (String line : lines) {
+            assertTrue(line.startsWith("{\"prediction\":"), "Line should start with {\"prediction\":: " + line);
+        }
+    }
+
+    @Test
+    public void testPredictWithExplainFlag() throws Exception {
+        System.out.println("Predict: --explain flag auto-enables JSON and outputs SHAP");
+        Path model = trainClassifier("random-forest", "--trees", "10");
+        outCapture.reset();
+
+        int exit = new CommandLine(new Predict()).execute(
+            IRIS_ARFF.toString(), "--model", model.toString(), "--explain"
+        );
+        assertEquals(0, exit);
+
+        String[] lines = outCapture.toString().trim().split("\\r?\\n");
+        assertEquals(150, lines.length);
+        for (String line : lines) {
+            assertTrue(line.contains("\"prediction\":"), "Line should contain prediction: " + line);
+            assertTrue(line.contains("\"explanations\":{\"shap\":[["), "Line should contain 2D shap matrix: " + line);
+        }
+    }
+
+    @Test
+    public void testPredictWithProbabilityAndExplain() throws Exception {
+        System.out.println("Predict: -p -e outputs prediction, probabilities, and explanations in JSON");
+        Path model = trainClassifier("random-forest", "--trees", "10");
+        outCapture.reset();
+
+        int exit = new CommandLine(new Predict()).execute(
+            IRIS_ARFF.toString(), "--model", model.toString(), "-p", "-e"
+        );
+        assertEquals(0, exit);
+
+        String[] lines = outCapture.toString().trim().split("\\r?\\n");
+        assertEquals(150, lines.length);
+        for (String line : lines) {
+            assertTrue(line.contains("\"prediction\":"), "Line should contain prediction: " + line);
+            assertTrue(line.contains("\"probabilities\":["), "Line should contain probabilities: " + line);
+            assertTrue(line.contains("\"explanations\":{\"shap\":[["), "Line should contain explanations: " + line);
+        }
+    }
+
+    @Test
+    public void testPredictExplainOnUnsupportedModelFails() throws Exception {
+        System.out.println("Predict: --explain on unsupported model fails with exit code 1");
+        Path model = tempDir.resolve("kmeans.sml");
+        int trainExit = new CommandLine(new Train()).execute(
+            "-d", IRIS_ARFF.toString(),
+            "--formula", "class ~ .",
+            "-m", model.toString(),
+            "kmeans", "-k", "3"
+        );
+        assertEquals(0, trainExit);
+        errCapture.reset();
+
+        int exit = new CommandLine(new Predict()).execute(
+            IRIS_ARFF.toString(), "--model", model.toString(), "--explain"
+        );
+        assertEquals(1, exit, "Should exit with 1 when model does not support explanations");
+        String err = errCapture.toString();
+        assertTrue(err.contains("does not support SHAP explanations"), "Error should mention unsupported SHAP: " + err);
+    }
+
+    @Test
+    public void testPredictClusteringOutputsClusterAndCentroid() throws Exception {
+        System.out.println("Predict clustering: outputs cluster label and centroid in text and JSON");
+        Path model = tempDir.resolve("kmeans.sml");
+        int trainExit = new CommandLine(new Train()).execute(
+            "-d", IRIS_ARFF.toString(),
+            "--formula", "class ~ .",
+            "-m", model.toString(),
+            "kmeans", "-k", "3"
+        );
+        assertEquals(0, trainExit);
+
+        // Plain text output
+        outCapture.reset();
+        int exitText = new CommandLine(new Predict()).execute(
+            IRIS_ARFF.toString(), "--model", model.toString()
+        );
+        assertEquals(0, exitText);
+        String[] textLines = outCapture.toString().trim().split("\\r?\\n");
+        assertEquals(150, textLines.length);
+        for (String line : textLines) {
+            String[] tokens = line.trim().split("\\s+");
+            assertEquals(5, tokens.length, "Expected cluster label + 4 centroid coordinates: " + line);
+        }
+
+        // JSON output
+        outCapture.reset();
+        int exitJson = new CommandLine(new Predict()).execute(
+            IRIS_ARFF.toString(), "--model", model.toString(), "--json"
+        );
+        assertEquals(0, exitJson);
+        String[] jsonLines = outCapture.toString().trim().split("\\r?\\n");
+        assertEquals(150, jsonLines.length);
+        for (String line : jsonLines) {
+            assertTrue(line.contains("\"prediction\":"), "JSON line should contain prediction: " + line);
+            assertTrue(line.contains("\"centroid\":["), "JSON line should contain centroid array: " + line);
+        }
+    }
+
+    @Test
+    public void testPredictVectorQuantizerSOMAndGNG() throws Exception {
+        System.out.println("Predict SOM and GNG: outputs prediction, centroid, and error");
+        Path somModel = tempDir.resolve("som.sml");
+        int somTrainExit = new CommandLine(new Train()).execute(
+            "-d", IRIS_ARFF.toString(),
+            "--formula", "class ~ .",
+            "-m", somModel.toString(),
+            "som", "--nrow", "3", "--ncol", "3", "--epochs", "5"
+        );
+        assertEquals(0, somTrainExit);
+
+        outCapture.reset();
+        int exitSomJson = new CommandLine(new Predict()).execute(
+            IRIS_ARFF.toString(), "--model", somModel.toString(), "--json"
+        );
+        assertEquals(0, exitSomJson);
+        String[] somLines = outCapture.toString().trim().split("\\r?\\n");
+        assertEquals(150, somLines.length);
+        for (String line : somLines) {
+            assertTrue(line.contains("\"prediction\":["), "SOM JSON line should contain 2D grid cell array: " + line);
+            assertTrue(line.contains("\"centroid\":["), "SOM JSON line should contain centroid: " + line);
+            assertTrue(line.contains("\"error\":"), "SOM JSON line should contain quantization error: " + line);
+        }
+    }
+
+    @Test
+    public void testPredictAnomalyModelOutputsBooleanAndScore() throws Exception {
+        System.out.println("Predict IsolationForest: outputs boolean anomaly flag and score in text and JSON");
+        Path iforestModel = tempDir.resolve("iforest.sml");
+        int trainExit = new CommandLine(new Train()).execute(
+            "-d", IRIS_ARFF.toString(),
+            "--formula", "class ~ .",
+            "-m", iforestModel.toString(),
+            "isolation-forest", "--trees", "50", "--threshold", "0.6"
+        );
+        assertEquals(0, trainExit);
+
+        // Plain text output
+        outCapture.reset();
+        int exitText = new CommandLine(new Predict()).execute(
+            IRIS_ARFF.toString(), "--model", iforestModel.toString()
+        );
+        assertEquals(0, exitText);
+        String[] textLines = outCapture.toString().trim().split("\\r?\\n");
+        assertEquals(150, textLines.length);
+        for (String line : textLines) {
+            String[] tokens = line.trim().split("\\s+");
+            assertEquals(2, tokens.length, "Expected boolean anomaly flag + score: " + line);
+            assertTrue(tokens[0].equals("true") || tokens[0].equals("false"), "First token should be boolean: " + line);
+            assertDoesNotThrow(() -> Double.parseDouble(tokens[1]));
+        }
+
+        // JSON output
+        outCapture.reset();
+        int exitJson = new CommandLine(new Predict()).execute(
+            IRIS_ARFF.toString(), "--model", iforestModel.toString(), "--json"
+        );
+        assertEquals(0, exitJson);
+        String[] jsonLines = outCapture.toString().trim().split("\\r?\\n");
+        assertEquals(150, jsonLines.length);
+        for (String line : jsonLines) {
+            assertTrue(line.contains("\"prediction\":true") || line.contains("\"prediction\":false"),
+                    "Anomaly JSON line should contain boolean prediction: " + line);
+            assertTrue(line.contains("\"score\":"), "Anomaly JSON line should contain score: " + line);
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Error handling
+    // ------------------------------------------------------------------
+
+    @Test
+    public void testPredictMissingModelFileProducesError() throws Exception {
+        System.out.println("Predict: missing model file produces non-zero exit");
+        int exit = new CommandLine(new Predict()).execute(
+            IRIS_ARFF.toString(), "--model", tempDir.resolve("nonexistent.sml").toString()
+        );
+        assertNotEquals(0, exit, "Should fail with missing model file");
+    }
+
+    @Test
+    public void testPredictMissingDataFileProducesError() throws Exception {
+        System.out.println("Predict: missing data file is reported as an error");
+        Path model = trainClassifier("random-forest", "--trees", "10");
+        outCapture.reset();
+
+        int exit = new CommandLine(new Predict()).execute(
+            tempDir.resolve("nodata.arff").toString(), "--model", model.toString()
+        );
+        assertNotEquals(0, exit, "Should fail when data file does not exist");
+    }
+}
+

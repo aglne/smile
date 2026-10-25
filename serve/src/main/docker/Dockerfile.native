@@ -1,0 +1,130 @@
+####
+#
+# Copyright (c) 2010-2026 Haifeng Li. All rights reserved.
+#
+# SMILE Serve is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
+#
+# SMILE Serve is distributed in the hope that it will be useful, but
+# WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+# Affero General Public License for more details.
+#
+# You should have received a copy of the GNU Affero General Public
+# License along with SMILE Serve. If not, see
+# <https://www.gnu.org/licenses/>.
+####
+
+###
+# This Dockerfile builds the full CPU-only container that runs the Quarkus application in native (no JVM) mode:
+# SMILE and ONNX inference, CPU chat (ONNX Runtime GenAI packages), auth/users and the embedded H2 database.
+# For an inference-only image see Dockerfile.micro. There is no LibTorch: without CUDA the chat engine only
+# serves ONNX Runtime GenAI packages, and LibTorch chat needs a GPU (Dockerfile.gpu).
+#
+# It is a two-stage in-container build: the Mandrel/GraalVM toolchain, Gradle and Node.js stay in the builder
+# stage; the final image only has the native executable and the shared libraries it loads at runtime.
+#
+# IMPORTANT: build context must be the repository root (not serve/), because Gradle builds all modules
+# (core, deep, ...). No host-side build step is required:
+#
+# docker build -f serve/src/main/docker/Dockerfile.native -t quarkus/smile-serve-native .
+#
+# Then run the container using:
+#
+# docker run -i --rm -p 8888:8080 -u root -v "$(pwd)/model":/model quarkus/smile-serve-native
+#
+# The native build needs several GB of RAM; give Docker at least 8 GB.
+# You can pass extra Gradle arguments with --build-arg GRADLE_ARGS="...".
+#
+# The Quarkus profile defaults to `local` (embedded H2 database, no PostgreSQL). Override it with, e.g.,
+#   --build-arg QUARKUS_PROFILE=prod
+# (the prod profile needs a PostgreSQL database; see serve/README.md).
+#
+###
+ARG MANDREL_BUILDER=quay.io/quarkus/ubi10-quarkus-mandrel-builder-image:jdk-25
+ARG RUNTIME_BASE=registry.access.redhat.com/ubi10/ubi-minimal:10.0
+
+# -----------------------------------------------------------------------------
+# Stage 1: build the native executable
+# -----------------------------------------------------------------------------
+FROM ${MANDREL_BUILDER} AS builder
+
+ARG ORT_VERSION=1.30.0
+ARG NODE_VERSION=24.11.0
+ARG GENAI_VERSION=0.17.0
+ARG GENAI_SHA256=482a17113556ff76c53820b801f391cdcbaac0b6c4089065182683c03fdbc8d9
+ARG QUARKUS_PROFILE=local
+ARG GRADLE_ARGS=""
+
+USER root
+
+# Archive tools. Node.js is needed by Quinoa for the web UI.
+RUN microdnf install -y gzip tar xz findutils && microdnf clean all
+RUN curl -fsSL --retry 5 --retry-delay 10 "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.xz" \
+    | tar -xJ -C /usr/local --strip-components=1
+
+# ONNX Runtime (libs copied to the runtime stage)
+RUN curl -fsSL --retry 5 --retry-delay 10 "https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/onnxruntime-linux-x64-${ORT_VERSION}.tgz" \
+    | tar -zx -C /usr/local/ \
+    && mv /usr/local/onnxruntime-linux-x64-${ORT_VERSION} /usr/local/onnxruntime
+
+# ONNX Runtime GenAI (libonnxruntime-genai.so): the CPU chat path. Without CUDA the chat engine loads
+# pre-converted GenAI (ONNX) packages through it.
+RUN curl -fsSL --retry 5 --retry-delay 10 -o /tmp/genai.tgz \
+        "https://github.com/microsoft/onnxruntime-genai/releases/download/v${GENAI_VERSION}/onnxruntime-genai-${GENAI_VERSION}-linux-x64.tar.gz" \
+    && echo "${GENAI_SHA256}  /tmp/genai.tgz" | sha256sum -c - \
+    && mkdir -p /usr/local/onnxruntime-genai \
+    && tar -zx -C /usr/local/onnxruntime-genai --strip-components=1 -f /tmp/genai.tgz \
+    && rm -f /tmp/genai.tgz
+
+# Native executable. Copy the whole repo (see .dockerignore) and build with the Gradle wrapper.
+WORKDIR /src
+COPY . /src
+RUN (cd serve/src/main/webui && npm install)
+RUN ./gradlew :serve:build -x test \
+        -Dquarkus.profile=${QUARKUS_PROFILE} \
+        -Dquarkus.native.enabled=true \
+        -Dquarkus.package.jar.enabled=false \
+        ${GRADLE_ARGS} \
+    && cp serve/build/*-runner /tmp/application \
+    && chmod 0755 /tmp/application
+
+# -----------------------------------------------------------------------------
+# Stage 2: runtime image (no GraalVM, Gradle, Node.js, compilers or headers)
+# -----------------------------------------------------------------------------
+FROM ${RUNTIME_BASE}
+
+LABEL org.opencontainers.image.title="SMILE Serve (Native)" \
+      org.opencontainers.image.licenses="AGPL-3.0-or-later OR LicenseRef-SMILE-Commercial" \
+      org.opencontainers.image.source="https://github.com/haifengl/smile" \
+      org.opencontainers.image.url="https://www.aihalo.dev/licensing.html"
+
+USER root
+
+# Install the OpenMP build of OpenBLAS (the ubi10 `openblas` package itself ships no libraries) for native BLAS/LAPACK and libgomp for its OpenMP build. ARPACK (and the FlexiBLAS/EPEL
+# packages it needs) is deliberately absent: only fit-time code (smile.manifold, SpectralClustering) uses it.
+RUN microdnf install -y openblas-openmp libgomp && microdnf clean all
+# The app dlopens libopenblas.so (smile.lib.blas / smile.lib.lapack default), but the OpenMP build is named libopenblaso.
+RUN ln -s libopenblaso.so.0 /usr/lib64/libopenblas.so
+
+# Runtime libraries only (no headers, cmake files or static libs)
+COPY --from=builder /usr/local/onnxruntime/lib /usr/local/onnxruntime/lib
+COPY --from=builder /usr/local/onnxruntime-genai/lib/libonnxruntime-genai.so /usr/local/onnxruntime-genai/lib/libonnxruntime-genai.so
+
+# Create /work (owned by 1001) before the COPYs so no later layer has to chown/chmod the 148 MB executable.
+RUN mkdir -p /work/lib && chown -R 1001:root /work && chmod g+rwX /work
+WORKDIR /work
+COPY --from=builder --chown=1001:root /tmp/application /work/application
+
+# ORT + ORT GenAI
+ENV LD_LIBRARY_PATH="/usr/local/onnxruntime/lib:/usr/local/onnxruntime-genai/lib:/work/lib"
+ENV ONNXRUNTIME_NATIVE_PATH="/usr/local/onnxruntime/lib" \
+    ONNXRUNTIME_GENAI_NATIVE_PATH="/usr/local/onnxruntime-genai/lib"
+ENV HF_HOME="/model/huggingface"
+
+EXPOSE 8080
+USER 1001
+
+ENTRYPOINT ["./application", "-Dquarkus.http.host=0.0.0.0"]

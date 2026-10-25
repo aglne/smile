@@ -1,0 +1,19 @@
+{
+  "servers": {
+    "exa": {
+      "type": "streamable-http",
+      "url": "https://mcp.exa.ai/mcp",
+      "x-smile-provides": ["web-search"]
+    },
+    "chrome-devtools": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "chrome-devtools-mcp@latest"],
+      "windows": {
+        "command": "cmd.exe",
+        "args": ["/c", "npx", "-y", "chrome-devtools-mcp@latest"]
+      },
+      "x-smile-agents": ["desktop-operator"]
+    }
+  }
+}

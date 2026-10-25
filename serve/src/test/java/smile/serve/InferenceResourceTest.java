@@ -1,0 +1,814 @@
+/*
+ * Copyright (c) 2010-2026 Haifeng Li. All rights reserved.
+ *
+ * SMILE Serve is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Affero General Public License as
+ * published by the Free Software Foundation, either version 3 of the
+ * License, or (at your option) any later version.
+ *
+ * SMILE Serve is distributed in the hope that it will be useful, but
+ * WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+ * Affero General Public License for more details.
+ *
+ * You should have received a copy of the GNU Affero General Public
+ * License along with SMILE Serve. If not, see
+ * <https://www.gnu.org/licenses/>.
+ */
+package smile.serve;
+
+import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.http.ContentType;
+import java.nio.file.Path;
+import java.util.Properties;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
+import smile.classification.DataFrameClassifier;
+import smile.data.Tuple;
+import smile.data.formula.Formula;
+import smile.data.type.DataTypes;
+import smile.data.type.StructField;
+import smile.data.type.StructType;
+import smile.model.ClassificationModel;
+import static io.restassured.RestAssured.given;
+import static org.hamcrest.CoreMatchers.is;
+import static org.hamcrest.CoreMatchers.notNullValue;
+import static org.hamcrest.Matchers.hasSize;
+/**
+ * Integration tests for {@link InferenceResource}.
+ *
+ * <p>These tests use the Quarkus test runtime with the {@code %test} profile,
+ * which loads a small pre-trained Random Forest model from
+ * {@code serve/src/test/resources/model/iris_random_forest.sml}.
+ */
+@QuarkusTest
+public class InferenceResourceTest {
+    // --------------------------------------------------------------- get metadata
+    /**
+     * GET /smile/{id} should return the full metadata for a known model.
+     */
+    @Test
+    public void testGetModelMetadata() {
+        // Given the iris_random_forest-1 model is loaded
+        // When fetching its metadata
+        // Then the response contains algorithm, schema and tags
+        given()
+            .when().get("/api/v1/smile/iris_random_forest-1")
+            .then()
+                .statusCode(200)
+                .contentType(ContentType.JSON)
+                .body("id", is("iris_random_forest-1"))
+                .body("algorithm", is("random-forest"))
+                .body("schema", notNullValue())
+                .body("schema.petallength.type", is("float"))
+                .body("schema.petallength.nullable", is(false))
+                .body("schema.petalwidth.type", is("float"))
+                .body("schema.sepalwidth.type", is("float"))
+                .body("schema.sepallength.type", is("float"));
+    }
+    /**
+     * GET /smile/{id} for an unknown model should return HTTP 404.
+     */
+    @Test
+    public void testGetUnknownModelReturns404() {
+        // Given no model with id "nonexistent-1" is loaded
+        // When fetching its metadata
+        // Then the response is 404
+        given()
+            .when().get("/api/v1/smile/nonexistent-1")
+            .then()
+                .statusCode(404);
+    }
+    // --------------------------------------------------------------- predict (JSON)
+    /**
+     * POST /smile/{id} with a valid JSON body should return a prediction and
+     * posterior probabilities for a soft classifier.
+     */
+    @Test
+    public void testPredictJsonReturnsPredictionAndProbabilities() {
+        // Given valid iris feature values
+        var request = "{\"petallength\":5.1,\"petalwidth\":3.5,\"sepallength\":1.4,\"sepalwidth\":0.2}";
+        var expected = "{\"prediction\":2,\"probabilities\":[0.052,0.187,0.761]}";
+        // When posting to the inference endpoint
+        // Then the response contains prediction = 2 with probabilities
+        given()
+            .contentType(ContentType.JSON)
+            .body(request)
+            .when().post("/api/v1/smile/iris_random_forest-1")
+            .then()
+                .statusCode(200)
+                .contentType(ContentType.JSON)
+                .body(is(expected));
+    }
+    /**
+     * POST /smile/{id} with all-zero features should still return a valid
+     * prediction (boundary / edge-case input).
+     */
+    @Test
+    public void testPredictJsonWithZeroFeaturesReturnsValidPrediction() {
+        // Given all-zero feature values
+        var request = "{\"petallength\":0.0,\"petalwidth\":0.0,\"sepallength\":0.0,\"sepalwidth\":0.0}";
+        // When posting to the inference endpoint
+        // Then the response has a numeric prediction field
+        given()
+            .contentType(ContentType.JSON)
+            .body(request)
+            .when().post("/api/v1/smile/iris_random_forest-1")
+            .then()
+                .statusCode(200)
+                .contentType(ContentType.JSON)
+                .body("prediction", notNullValue());
+    }
+    /**
+     * POST /smile/{id} with a missing required field should return HTTP 400.
+     */
+    @Test
+    public void testPredictJsonMissingFieldReturns400() {
+        // Given a JSON body that is missing the "petalwidth" field
+        var request = "{\"petallength\":5.1,\"sepallength\":1.4,\"sepalwidth\":0.2}";
+        // When posting to the inference endpoint
+        // Then the response is 400 Bad Request
+        given()
+            .contentType(ContentType.JSON)
+            .body(request)
+            .when().post("/api/v1/smile/iris_random_forest-1")
+            .then()
+                .statusCode(400);
+    }
+    /**
+     * POST /smile/{id} for an unknown model ID should return HTTP 404.
+     */
+    @Test
+    public void testPredictUnknownModelReturns404() {
+        // Given no model "unknown-model-1" is loaded
+        var request = "{\"petallength\":5.1,\"petalwidth\":3.5,\"sepallength\":1.4,\"sepalwidth\":0.2}";
+        // When posting a prediction request
+        // Then the response is 404
+        given()
+            .contentType(ContentType.JSON)
+            .body(request)
+            .when().post("/api/v1/smile/unknown-model-1")
+            .then()
+                .statusCode(404);
+    }
+    // --------------------------------------------------------------- stream (CSV)
+    /**
+     * POST /smile/{id}/stream with a CSV body should stream one result per
+     * non-blank input line.
+     *
+     * <p>The endpoint uses SSE (server-sent events) emitting structured JSON objects
+     * prefixed with {@code "data:"} by the Quarkus RESTEasy Reactive runtime.
+     */
+    @Test
+    public void testStreamCsvReturnsPredictions() {
+        // Given three CSV rows for the iris model
+        // Column order matches the model schema (alphabetical): petallength, petalwidth, sepallength, sepalwidth
+        var csvBody = "5.1,3.5,1.4,0.2\n6.7,3.0,5.2,2.3\n5.8,2.7,4.1,1.0\n";
+        // When posting to the stream endpoint with text/plain
+        // Then the response body contains three SSE data lines
+        String body = given()
+            .contentType(ContentType.TEXT)
+            .body(csvBody)
+            .when().post("/api/v1/smile/iris_random_forest-1/stream")
+            .then()
+                .statusCode(200)
+                .extract().body().asString();
+        // Filter to non-blank lines; each SSE chunk looks like "data: <json>"
+        var dataLines = body.lines()
+                .filter(l -> !l.isBlank() && l.startsWith("data:"))
+                .toList();
+        Assertions.assertEquals(3, dataLines.size(),
+                "Expected 3 SSE data lines but got: " + body);
+        // Each "data:" line must carry a JSON object with prediction and probabilities
+        for (var line : dataLines) {
+            String payload = line.substring("data:".length()).trim();
+            Assertions.assertTrue(
+                    payload.startsWith("{") && payload.contains("\"prediction\":"),
+                    "Expected prediction JSON object in payload: " + payload);
+        }
+    }
+    /**
+     * POST /smile/{id}/stream with a JSON-lines body should stream one result
+     * per non-blank JSON object.
+     */
+    @Test
+    public void testStreamJsonLinesReturnsPredictions() {
+        // Given two JSON-lines rows for the iris model
+        var jsonLines = "{\"petallength\":5.1,\"petalwidth\":3.5,\"sepallength\":1.4,\"sepalwidth\":0.2}\n"
+                + "{\"petallength\":6.7,\"petalwidth\":3.0,\"sepallength\":5.2,\"sepalwidth\":2.3}\n";
+        // When posting to the stream endpoint with application/json
+        // Then the response contains two SSE data lines
+        String body = given()
+            .contentType(ContentType.JSON)
+            .body(jsonLines)
+            .when().post("/api/v1/smile/iris_random_forest-1/stream")
+            .then()
+                .statusCode(200)
+                .extract().body().asString();
+        var dataLines = body.lines()
+                .filter(l -> !l.isBlank() && l.startsWith("data:"))
+                .toList();
+        Assertions.assertEquals(2, dataLines.size(),
+                "Expected 2 SSE data lines but got: " + body);
+    }
+    /**
+     * POST /smile/{id}/stream with a CSV that has too few columns will fail
+     * mid-stream. Because HTTP headers are committed before the stream body
+     * is sent, the status code is 200 but the connection is closed early by
+     * the server without emitting any {@code data:} lines.
+     *
+     * <p>Note: SSE streams cannot propagate HTTP error codes after the headers
+     * have been flushed; the server signals the error by closing the stream.
+     */
+    @Test
+    public void testStreamCsvTooFewColumnsEmitsNoPredictions() {
+        // Given a CSV row with only 2 columns (model needs 4)
+        var badCsv = "5.1,3.5\n";
+        // When posting to the stream endpoint
+        // Then the server returns 200 (headers already flushed) but closes the stream
+        // immediately on error without emitting any prediction data lines.
+        // RestAssured may throw ConnectionClosedException; we catch it to verify the invariant.
+        try {
+            String body = given()
+                .contentType(ContentType.TEXT)
+                .body(badCsv)
+                .when().post("/api/v1/smile/iris_random_forest-1/stream")
+                .then()
+                .extract().body().asString();
+            // If we get a body at all, it must contain no valid data lines.
+            long dataLineCount = body.lines()
+                    .filter(l -> l.startsWith("data:"))
+                    .count();
+            Assertions.assertEquals(0, dataLineCount,
+                    "Stream should not emit data lines for bad input, but got: " + body);
+        } catch (Exception e) {
+            // ConnectionClosedException or similar is expected when the server
+            // closes the stream early due to the processing error.
+            // The exact message varies by HTTP client version, e.g.:
+            //   "Premature end of chunk coded message body: closing chunk expected"
+            //   "Connection reset"
+            //   "Remote connection closed"
+            boolean isExpected = e.getClass().getSimpleName().contains("Closed")
+                    || e.getClass().getSimpleName().contains("Connection")
+                    || (e.getMessage() != null && (
+                            e.getMessage().contains("Connection") ||
+                            e.getMessage().contains("closed") ||
+                            e.getMessage().contains("closing") ||
+                            e.getMessage().contains("reset") ||
+                            e.getMessage().contains("Premature") ||
+                            e.getMessage().contains("stream")));
+            Assertions.assertTrue(isExpected, "Unexpected exception: " + e);
+        }
+    }
+    /**
+     * POST /smile/{id}/stream for an unknown model should return HTTP 404
+     * before any stream is established.
+     */
+    @Test
+    public void testStreamUnknownModelReturns404() {
+        // Given no model "ghost-model-1" is loaded
+        // When posting to its stream endpoint
+        // Then the response is 404
+        given()
+            .contentType(ContentType.TEXT)
+            .body("5.1,3.5,1.4,0.2\n")
+            .when().post("/api/v1/smile/ghost-model-1/stream")
+            .then()
+                .statusCode(404);
+    }
+
+    // --------------------------------------------------------------- explanations (SHAP)
+    /**
+     * POST /smile/{id} with enableExplanations: true in JSON payload returns SHAP values.
+     */
+    @Test
+    public void testPredictJsonWithExplanationsPayload() {
+        var request = "{\"petallength\":5.1,\"petalwidth\":3.5,\"sepallength\":1.4,\"sepalwidth\":0.2,\"enableExplanations\":true}";
+        given()
+            .contentType(ContentType.JSON)
+            .body(request)
+            .when().post("/api/v1/smile/iris_random_forest-1")
+            .then()
+                .statusCode(200)
+                .contentType(ContentType.JSON)
+                .body("prediction", notNullValue())
+                .body("probabilities", notNullValue())
+                .body("explanations", notNullValue())
+                .body("explanations.shap", hasSize(3))
+                .body("explanations.shap[0]", hasSize(4))
+                .body("explanations.shap[1]", hasSize(4))
+                .body("explanations.shap[2]", hasSize(4));
+    }
+
+    /**
+     * POST /smile/{id}?explain=true returns SHAP values.
+     */
+    @Test
+    public void testPredictJsonWithExplainQueryParam() {
+        var request = "{\"petallength\":5.1,\"petalwidth\":3.5,\"sepallength\":1.4,\"sepalwidth\":0.2}";
+        given()
+            .contentType(ContentType.JSON)
+            .body(request)
+            .when().post("/api/v1/smile/iris_random_forest-1?explain=true")
+            .then()
+                .statusCode(200)
+                .contentType(ContentType.JSON)
+                .body("prediction", notNullValue())
+                .body("explanations.shap", hasSize(3))
+                .body("explanations.shap[0]", hasSize(4));
+    }
+
+    /**
+     * POST /smile/{id}/stream?explain=true with CSV input returns SHAP values in SSE events.
+     */
+    @Test
+    public void testStreamCsvWithExplainQueryParam() {
+        var csvBody = "5.1,3.5,1.4,0.2\n6.7,3.0,5.2,2.3\n";
+        String body = given()
+            .contentType(ContentType.TEXT)
+            .body(csvBody)
+            .when().post("/api/v1/smile/iris_random_forest-1/stream?explain=true")
+            .then()
+                .statusCode(200)
+                .extract().body().asString();
+
+        var dataLines = body.lines()
+                .filter(l -> !l.isBlank() && l.startsWith("data:"))
+                .toList();
+        Assertions.assertEquals(2, dataLines.size());
+        for (var line : dataLines) {
+            String payload = line.substring("data:".length()).trim();
+            Assertions.assertTrue(payload.contains("\"explanations\":{\"shap\":["),
+                    "Expected explanations in payload: " + payload);
+        }
+    }
+
+    /**
+     * POST /smile/{id}/stream with JSON-lines containing enableExplanations returns SHAP values.
+     */
+    @Test
+    public void testStreamJsonLinesWithExplanations() {
+        var jsonLines = "{\"petallength\":5.1,\"petalwidth\":3.5,\"sepallength\":1.4,\"sepalwidth\":0.2,\"enableExplanations\":true}\n"
+                + "{\"petallength\":6.7,\"petalwidth\":3.0,\"sepallength\":5.2,\"sepalwidth\":2.3}\n";
+        String body = given()
+            .contentType(ContentType.JSON)
+            .body(jsonLines)
+            .when().post("/api/v1/smile/iris_random_forest-1/stream")
+            .then()
+                .statusCode(200)
+                .extract().body().asString();
+
+        var dataLines = body.lines()
+                .filter(l -> !l.isBlank() && l.startsWith("data:"))
+                .toList();
+        Assertions.assertEquals(2, dataLines.size());
+        // First line requested explanations
+        String first = dataLines.get(0).substring("data:".length()).trim();
+        Assertions.assertTrue(first.contains("\"explanations\":{\"shap\":["),
+                "Expected explanations in first payload: " + first);
+        // Second line did not request explanations
+        String second = dataLines.get(1).substring("data:".length()).trim();
+        Assertions.assertFalse(second.contains("\"explanations\""),
+                "Did not expect explanations in second payload: " + second);
+    }
+
+    /**
+     * Verifies that models not supporting SHAP return "Not supported".
+     */
+    @Test
+    public void testExplanationsUnsupportedModel() {
+        var schema = new StructType(
+                new StructField("x1", DataTypes.DoubleType),
+                new StructField("x2", DataTypes.DoubleType)
+        );
+        var formula = Formula.lhs("y");
+        DataFrameClassifier dummyClassifier = new DataFrameClassifier() {
+            @Override
+            public Formula formula() { return formula; }
+            @Override
+            public StructType schema() { return schema; }
+            @Override
+            public int predict(Tuple x) { return 1; }
+            @Override
+            public int numClasses() { return 2; }
+            @Override
+            public int[] classes() { return new int[]{0, 1}; }
+        };
+        var model = new ClassificationModel("dummy", schema, formula, dummyClassifier,
+                null, null, null, new Properties());
+        var inferenceModel = new InferenceModel(model, Path.of("dummy.sml"));
+        Assertions.assertFalse(inferenceModel.supportsShap());
+
+        var input = Tuple.of(schema, new Object[]{1.0, 2.0});
+        var response = inferenceModel.predict(input, true);
+        Assertions.assertNotNull(response.explanations());
+        Assertions.assertEquals("Not supported", response.explanations().shap());
+    }
+
+    // --------------------------------------------------------------- health
+    @Test
+    public void testGetModelHealth() {
+        given()
+            .when().get("/api/v1/smile/iris_random_forest-1/health")
+            .then()
+                .statusCode(200)
+                .contentType(ContentType.JSON)
+                .body("id", is("iris_random_forest-1"))
+                .body("status", is("ACTIVE"))
+                .body("in_flight_requests", is(0))
+                .body("uptime_seconds", notNullValue());
+    }
+
+    // --------------------------------------------------------------- reload & unload
+    @Test
+    public void testReloadModel() {
+        given()
+            .when().post("/api/v1/smile/iris_random_forest-1/reload")
+            .then()
+                .statusCode(200)
+                .contentType(ContentType.JSON)
+                .body("status", is("reloaded"))
+                .body("id", is("iris_random_forest-1"))
+                .body("algorithm", is("random-forest"));
+    }
+
+    @Test
+    public void testUnloadAndReloadModel() {
+        // Unload the model
+        given()
+            .when().post("/api/v1/smile/iris_random_forest-1/unload?timeout=5")
+            .then()
+                .statusCode(200)
+                .contentType(ContentType.JSON)
+                .body("status", is("unloaded"))
+                .body("id", is("iris_random_forest-1"))
+                .body("drained", is(true));
+
+        // Subsequent requests should return 404
+        given()
+            .when().get("/api/v1/smile/iris_random_forest-1")
+            .then()
+                .statusCode(404);
+
+        // Reload unloaded model from disk should restore it
+        given()
+            .when().post("/api/v1/smile/iris_random_forest-1/reload")
+            .then()
+                .statusCode(200)
+                .body("status", is("reloaded"))
+                .body("id", is("iris_random_forest-1"));
+
+        // Verify model is accessible again
+        given()
+            .when().get("/api/v1/smile/iris_random_forest-1")
+            .then()
+                .statusCode(200);
+    }
+
+    // --------------------------------------------------------------- KernelSHAP & options
+    /**
+     * Verifies KernelSHAP explanations and optional per-request samples/ridge parameters
+     * on a non-tree model (LDA) via query parameters, JSON payload fields, and streaming.
+     */
+    @Test
+    public void testKernelShapWithOptionalParameters() {
+        var sample = "{\"sepallength\":6.7,\"sepalwidth\":3.0,\"petallength\":5.2,\"petalwidth\":2.3}";
+
+        // 1. Default KernelSHAP via ?explain=true
+        given()
+            .contentType(ContentType.JSON)
+            .body(sample)
+            .when().post("/api/v1/smile/iris_lda-1?explain=true")
+            .then()
+                .statusCode(200)
+                .body("prediction", is(2))
+                .body("explanations.shap", hasSize(3))
+                .body("explanations.shap[0]", hasSize(4));
+
+        // 2. Custom samples and ridge via query parameters
+        given()
+            .contentType(ContentType.JSON)
+            .body(sample)
+            .when().post("/api/v1/smile/iris_lda-1?explain=true&samples=32&ridge=1e-4")
+            .then()
+                .statusCode(200)
+                .body("prediction", is(2))
+                .body("explanations.shap", hasSize(3))
+                .body("explanations.shap[0]", hasSize(4));
+
+        // 3. Custom shapSamples and shapRidge via JSON body
+        var jsonWithFlatOpts = "{\"sepallength\":6.7,\"sepalwidth\":3.0,\"petallength\":5.2,\"petalwidth\":2.3,"
+                + "\"enableExplanations\":true,\"shapSamples\":32,\"shapRidge\":1e-5}";
+        given()
+            .contentType(ContentType.JSON)
+            .body(jsonWithFlatOpts)
+            .when().post("/api/v1/smile/iris_lda-1")
+            .then()
+                .statusCode(200)
+                .body("prediction", is(2))
+                .body("explanations.shap", hasSize(3))
+                .body("explanations.shap[0]", hasSize(4));
+
+        // 4. Custom nested shap object in JSON body (also implicitly enables explanations)
+        var jsonWithNestedShap = "{\"sepallength\":6.7,\"sepalwidth\":3.0,\"petallength\":5.2,\"petalwidth\":2.3,"
+                + "\"shap\":{\"samples\":32,\"ridge\":1e-5}}";
+        given()
+            .contentType(ContentType.JSON)
+            .body(jsonWithNestedShap)
+            .when().post("/api/v1/smile/iris_lda-1")
+            .then()
+                .statusCode(200)
+                .body("prediction", is(2))
+                .body("explanations.shap", hasSize(3))
+                .body("explanations.shap[0]", hasSize(4));
+
+        // 5. Streaming CSV with KernelSHAP query parameters
+        var csvBody = "5.1,3.5,1.4,0.2\n6.7,3.0,5.2,2.3\n";
+        String streamBody = given()
+            .contentType(ContentType.TEXT)
+            .body(csvBody)
+            .when().post("/api/v1/smile/iris_lda-1/stream?explain=true&samples=32&ridge=1e-5")
+            .then()
+                .statusCode(200)
+                .extract().body().asString();
+        var dataLines = streamBody.lines()
+                .filter(l -> !l.isBlank() && l.startsWith("data:"))
+                .toList();
+        Assertions.assertEquals(2, dataLines.size());
+        for (var line : dataLines) {
+            Assertions.assertTrue(line.contains("\"explanations\":{\"shap\":["),
+                    "Expected KernelSHAP explanations in stream line: " + line);
+        }
+
+        // 6. Invalid KernelSHAP parameters return 400 Bad Request
+        given()
+            .contentType(ContentType.JSON)
+            .body(sample)
+            .when().post("/api/v1/smile/iris_lda-1?explain=true&samples=-1")
+            .then()
+                .statusCode(400);
+
+        given()
+            .contentType(ContentType.JSON)
+            .body(sample)
+            .when().post("/api/v1/smile/iris_lda-1?explain=true&ridge=-0.1")
+            .then()
+                .statusCode(400);
+    }
+
+    // --------------------------------------------------------------- Clustering model
+    @Test
+    public void testGivenClusteringModelWhenLoadedAndQueriedThenReturnsPredictionAndCentroid() throws Exception {
+        // Given a K-Means ClusteringModel saved to a temporary .sml file
+        var data = smile.io.Read.arff(smile.io.Paths.getTestData("weka/iris.arff"));
+        var params = new Properties();
+        params.setProperty("smile.clustering.k", "3");
+        var clusteringModel = smile.model.Model.clustering("kmeans", Formula.lhs("class"), data, params);
+        clusteringModel.setTag(smile.model.Model.ID, "iris_kmeans");
+        clusteringModel.setTag(smile.model.Model.VERSION, "1");
+        Path tempModel = smile.io.Write.object(clusteringModel);
+
+        try {
+            // When loading the clustering model dynamically
+            String escapedPath = tempModel.toAbsolutePath().toString().replace("\\", "\\\\");
+            given()
+                .contentType(ContentType.JSON)
+                .body("{\"model\":\"" + escapedPath + "\",\"kind\":\"smile\"}")
+                .when().post("/api/v1/models/load")
+                .then()
+                    .statusCode(200)
+                    .body("id", is("iris_kmeans-1"));
+
+            // Then GET /api/v1/models/iris_kmeans-1 includes clustering details in smile.train
+            given()
+                .when().get("/api/v1/models/iris_kmeans-1")
+                .then()
+                    .statusCode(200)
+                    .body("kind", is("kmeans"))
+                    .body("smile.train.k", is(3))
+                    .body("smile.train.size", is(150))
+                    .body("smile.train.distortion", notNullValue())
+                    .body("smile.train.cluster_sizes", hasSize(3))
+                    .body("smile.train.distortions", hasSize(3));
+
+            // And POST /api/v1/smile/iris_kmeans-1 returns cluster prediction and centroid
+            var sample = "{\"sepallength\":5.1,\"sepalwidth\":3.5,\"petallength\":1.4,\"petalwidth\":0.2}";
+            given()
+                .contentType(ContentType.JSON)
+                .body(sample)
+                .when().post("/api/v1/smile/iris_kmeans-1")
+                .then()
+                    .statusCode(200)
+                    .body("prediction", notNullValue())
+                    .body("centroid", hasSize(4));
+        } finally {
+            given().when().post("/api/v1/smile/iris_kmeans-1/unload?timeout=5");
+            java.nio.file.Files.deleteIfExists(tempModel);
+        }
+    }
+
+    // --------------------------------------------------------------- VectorQuantizerModel & Online Update
+    @Test
+    public void testGivenVectorQuantizerSOMWhenLoadedQueriedAndUpdatedOnlineThenSucceeds() throws Exception {
+        // Given a SOM VectorQuantizerModel saved to a temporary .sml file
+        var data = smile.io.Read.arff(smile.io.Paths.getTestData("weka/iris.arff"));
+        var params = new Properties();
+        params.setProperty("smile.som.nrow", "3");
+        params.setProperty("smile.som.ncol", "3");
+        params.setProperty("smile.som.epochs", "5");
+        var somModel = smile.model.Model.quantizer("som", Formula.lhs("class"), data, params);
+        somModel.setTag(smile.model.Model.ID, "iris_som");
+        somModel.setTag(smile.model.Model.VERSION, "1");
+        Path tempModel = smile.io.Write.object(somModel);
+
+        try {
+            String escapedPath = tempModel.toAbsolutePath().toString().replace("\\", "\\\\");
+            given()
+                .contentType(ContentType.JSON)
+                .body("{\"model\":\"" + escapedPath + "\",\"kind\":\"smile\"}")
+                .when().post("/api/v1/models/load")
+                .then()
+                    .statusCode(200)
+                    .body("id", is("iris_som-1"));
+
+            // Metadata indicates online = true
+            given()
+                .when().get("/api/v1/smile/iris_som-1")
+                .then()
+                    .statusCode(200)
+                    .body("algorithm", is("som"))
+                    .body("online", is(true));
+
+            // GET /api/v1/models/iris_som-1 includes SOM lattice details
+            given()
+                .when().get("/api/v1/models/iris_som-1")
+                .then()
+                    .statusCode(200)
+                    .body("kind", is("som"))
+                    .body("smile.train.online", is(true))
+                    .body("smile.train.nrow", is(3))
+                    .body("smile.train.ncol", is(3))
+                    .body("smile.train.neurons", is(9));
+
+            // POST /api/v1/smile/iris_som-1 returns 2D grid prediction [row, col], centroid, and error
+            var sample = "{\"sepallength\":5.1,\"sepalwidth\":3.5,\"petallength\":1.4,\"petalwidth\":0.2}";
+            given()
+                .contentType(ContentType.JSON)
+                .body(sample)
+                .when().post("/api/v1/smile/iris_som-1")
+                .then()
+                    .statusCode(200)
+                    .body("prediction", hasSize(2))
+                    .body("centroid", hasSize(4))
+                    .body("error", notNullValue());
+
+            // Online update single JSON sample with ?persist=true
+            given()
+                .contentType(ContentType.JSON)
+                .body(sample)
+                .when().post("/api/v1/smile/iris_som-1/update?persist=true")
+                .then()
+                    .statusCode(200)
+                    .body("status", is("updated"))
+                    .body("id", is("iris_som-1"))
+                    .body("updated", is(1))
+                    .body("persisted", is(true));
+
+            // Online update batch CSV stream
+            var csvBody = "5.1,3.5,1.4,0.2\n6.7,3.0,5.2,2.3\n";
+            given()
+                .contentType(ContentType.TEXT)
+                .body(csvBody)
+                .when().post("/api/v1/smile/iris_som-1/update/stream?persist=true")
+                .then()
+                    .statusCode(200)
+                    .body("status", is("updated"))
+                    .body("updated", is(2))
+                    .body("persisted", is(true));
+
+            // Updating a non-online model (iris_random_forest-1) returns 400 Bad Request
+            given()
+                .contentType(ContentType.JSON)
+                .body(sample)
+                .when().post("/api/v1/smile/iris_random_forest-1/update")
+                .then()
+                    .statusCode(400);
+        } finally {
+            given().when().post("/api/v1/smile/iris_som-1/unload?timeout=5");
+            java.nio.file.Files.deleteIfExists(tempModel);
+        }
+    }
+
+    @Test
+    public void testGivenOnlineSupervisedModelWhenUpdatedOnlineThenSucceeds() throws Exception {
+        // Given an online LogisticRegression ClassificationModel saved to a temporary .sml file
+        var data = smile.io.Read.arff(smile.io.Paths.getTestData("weka/iris.arff"));
+        var logitModel = smile.model.Model.classification("logistic", Formula.lhs("class"), data, null, new Properties());
+        logitModel.setTag(smile.model.Model.ID, "iris_logit");
+        logitModel.setTag(smile.model.Model.VERSION, "1");
+        Path tempModel = smile.io.Write.object(logitModel);
+
+        try {
+            String escapedPath = tempModel.toAbsolutePath().toString().replace("\\", "\\\\");
+            given()
+                .contentType(ContentType.JSON)
+                .body("{\"model\":\"" + escapedPath + "\",\"kind\":\"smile\"}")
+                .when().post("/api/v1/models/load")
+                .then()
+                    .statusCode(200)
+                    .body("id", is("iris_logit-1"));
+
+            // Metadata exposes online = true and response = "class"
+            given()
+                .when().get("/api/v1/smile/iris_logit-1")
+                .then()
+                    .statusCode(200)
+                    .body("online", is(true))
+                    .body("response", is("class"))
+                    .body("responseType", is("integer"));
+
+            // Update with target field "class"
+            var sampleWithTarget = "{\"sepallength\":5.1,\"sepalwidth\":3.5,\"petallength\":1.4,\"petalwidth\":0.2,\"class\":0}";
+            given()
+                .contentType(ContentType.JSON)
+                .body(sampleWithTarget)
+                .when().post("/api/v1/smile/iris_logit-1/update")
+                .then()
+                    .statusCode(200)
+                    .body("status", is("updated"))
+                    .body("updated", is(1));
+
+            // Missing target field returns 400 Bad Request
+            var sampleWithoutTarget = "{\"sepallength\":5.1,\"sepalwidth\":3.5,\"petallength\":1.4,\"petalwidth\":0.2}";
+            given()
+                .contentType(ContentType.JSON)
+                .body(sampleWithoutTarget)
+                .when().post("/api/v1/smile/iris_logit-1/update")
+                .then()
+                    .statusCode(400);
+        } finally {
+            given().when().post("/api/v1/smile/iris_logit-1/unload?timeout=5");
+            java.nio.file.Files.deleteIfExists(tempModel);
+        }
+    }
+
+    // --------------------------------------------------------------- AnomalyModel
+    @Test
+    public void testGivenAnomalyModelWhenLoadedAndQueriedThenReturnsPredictionAndScore() throws Exception {
+        // Given an IsolationForest AnomalyModel saved to a temporary .sml file
+        var data = smile.io.Read.arff(smile.io.Paths.getTestData("weka/iris.arff"));
+        var params = new Properties();
+        params.setProperty("smile.isolation_forest.trees", "50");
+        params.setProperty("smile.anomaly.threshold", "0.55");
+        var anomalyModel = smile.model.Model.anomaly("isolation-forest", Formula.lhs("class"), data, params);
+        anomalyModel.setTag(smile.model.Model.ID, "iris_iforest");
+        anomalyModel.setTag(smile.model.Model.VERSION, "1");
+        Path tempModel = smile.io.Write.object(anomalyModel);
+
+        try {
+            String escapedPath = tempModel.toAbsolutePath().toString().replace("\\", "\\\\");
+            given()
+                .contentType(ContentType.JSON)
+                .body("{\"model\":\"" + escapedPath + "\",\"kind\":\"smile\"}")
+                .when().post("/api/v1/models/load")
+                .then()
+                    .statusCode(200)
+                    .body("id", is("iris_iforest-1"));
+
+            // GET /api/v1/models/iris_iforest-1 includes IsolationForest details in smile.train
+            given()
+                .when().get("/api/v1/models/iris_iforest-1")
+                .then()
+                    .statusCode(200)
+                    .body("kind", is("isolation-forest"))
+                    .body("smile.train.trees", is(50))
+                    .body("smile.train.extension_level", is(0))
+                    .body("smile.train.threshold", is(0.55f));
+
+            // POST /api/v1/smile/iris_iforest-1 on normal sample returns boolean prediction and score
+            var inlier = "{\"sepallength\":5.1,\"sepalwidth\":3.5,\"petallength\":1.4,\"petalwidth\":0.2}";
+            given()
+                .contentType(ContentType.JSON)
+                .body(inlier)
+                .when().post("/api/v1/smile/iris_iforest-1")
+                .then()
+                    .statusCode(200)
+                    .body("prediction", is(false))
+                    .body("score", notNullValue());
+
+            // POST /api/v1/smile/iris_iforest-1 on extreme outlier returns prediction = true
+            var outlier = "{\"sepallength\":100.0,\"sepalwidth\":100.0,\"petallength\":100.0,\"petalwidth\":100.0}";
+            given()
+                .contentType(ContentType.JSON)
+                .body(outlier)
+                .when().post("/api/v1/smile/iris_iforest-1")
+                .then()
+                    .statusCode(200)
+                    .body("prediction", is(true))
+                    .body("score", notNullValue());
+        } finally {
+            given().when().post("/api/v1/smile/iris_iforest-1/unload?timeout=5");
+            java.nio.file.Files.deleteIfExists(tempModel);
+        }
+    }
+}

@@ -1,0 +1,23 @@
+# Keeps `docker build` context transfer fast for Dockerfiles whose context is
+# the repository root (Dockerfile.gpu, Dockerfile.native, Dockerfile.gpu-test) and which
+# COPY broad parts of the repo. Dockerfile uses
+# `serve/` as its own context root and is unaffected by this file.
+#
+# Host build output is not used by any repo-root-context Dockerfile (they all build in Docker), so each module's
+# build/ directory is excluded by name.
+.git/
+/base/build/
+/core/build/
+/deep/build/
+/nlp/build/
+/plot/build/
+/kotlin/build/
+/buildSrc/build/
+/studio/build/
+/serve/build/
+/spark/build/
+
+**/node_modules/
+**/.gradle/
+**/.idea/
+**/.DS_Store

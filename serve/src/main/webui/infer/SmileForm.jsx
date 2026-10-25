@@ -1,0 +1,450 @@
+/*
+ * Copyright (c) 2010-2026 Haifeng Li. All rights reserved.
+ *
+ * SMILE Serve is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Affero General Public License as
+ * published by the Free Software Foundation, either version 3 of the
+ * License, or (at your option) any later version.
+ *
+ * SMILE Serve is distributed in the hope that it will be useful, but
+ * WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+ * Affero General Public License for more details.
+ *
+ * You should have received a copy of the GNU Affero General Public
+ * License along with SMILE Serve. If not, see
+ * <https://www.gnu.org/licenses/>.
+ */
+import React, { useEffect, useRef, useState } from "react";
+import Form from "@rjsf/core";
+import validator from "@rjsf/validator-ajv8";
+import {
+  detectBatchFileKind,
+  prepareCsv,
+  readSseStream,
+  toJsonLines,
+  tryParseJson,
+} from "./inferStream";
+import { normalizePrediction } from "./predictionRows";
+import {
+  buildExplainUrl,
+  isKernelShapAlgorithm,
+  shapMethodForAlgorithm,
+} from "./shap/shapUtils";
+import PredictionResults from "./PredictionResults";
+import InferActionFooter from "./InferActionFooter";
+import "./InferPanel.css";
+
+function typeOf(type) {
+  switch (type) {
+    case "float":
+    case "double":
+      return "number";
+    case "byte":
+    case "short":
+    case "char":
+    case "integer":
+    case "long":
+      return "integer";
+    case "bool":
+      return "boolean";
+    default:
+      return type;
+  }
+}
+
+function toJsonSchema(model, onlineMode = false) {
+  const jsonSchema = {
+    title: model.id,
+    type: "object",
+    required: [],
+    properties: {},
+  };
+  for (const key in model.schema) {
+    const field = model.schema[key];
+    jsonSchema.properties[key] = { type: typeOf(field.type) };
+    if (!field.nullable) {
+      jsonSchema.required.push(key);
+    }
+  }
+  if (onlineMode && model.response) {
+    jsonSchema.properties[model.response] = {
+      type: typeOf(model.responseType || "number"),
+      title: `${model.response} (target)`,
+    };
+    jsonSchema.required.push(model.response);
+  }
+  return jsonSchema;
+}
+
+function schemaKeys(model, onlineMode = false) {
+  const keys = model?.schema ? Object.keys(model.schema) : [];
+  if (onlineMode && model?.response && !keys.includes(model.response)) {
+    return [...keys, model.response];
+  }
+  return keys;
+}
+
+function SmileForm({ modelId }) {
+  const [modelMeta, setModelMeta] = useState(null);
+  const [schema, setSchema] = useState(null);
+  const [rows, setRows] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+  const [submitError, setSubmitError] = useState(null);
+  const [file, setFile] = useState(null);
+  const [formData, setFormData] = useState({});
+  const [explain, setExplain] = useState(true);
+  const [shapSamples, setShapSamples] = useState("");
+  const [shapRidge, setShapRidge] = useState("");
+  const [onlineMode, setOnlineMode] = useState(false);
+  const [persistUpdate, setPersistUpdate] = useState(false);
+  const [streaming, setStreaming] = useState(false);
+  const [streamCount, setStreamCount] = useState(0);
+  const [startedAt, setStartedAt] = useState(null);
+  const [finishedAt, setFinishedAt] = useState(null);
+  const abortRef = useRef(null);
+  const resultIdRef = useRef(0);
+  const pendingRef = useRef([]);
+  const flushRafRef = useRef(0);
+
+  useEffect(() => {
+    if (!modelId) {
+      return;
+    }
+    setLoading(true);
+    setError(null);
+    setSchema(null);
+    setModelMeta(null);
+    setRows([]);
+    setFile(null);
+    setFormData({});
+    setOnlineMode(false);
+    setPersistUpdate(false);
+    setSubmitError(null);
+    setStartedAt(null);
+    setFinishedAt(null);
+
+    fetch(`/api/v1/smile/${modelId}`)
+      .then((res) => {
+        if (!res.ok) {
+          throw new Error("Failed to fetch model schema");
+        }
+        return res.json();
+      })
+      .then((data) => {
+        setModelMeta(data);
+        setSchema(toJsonSchema(data, false));
+        setLoading(false);
+      })
+      .catch((err) => {
+        setError(err.message);
+        setLoading(false);
+      });
+
+    return () => {
+      abortRef.current?.abort();
+      if (flushRafRef.current) {
+        cancelAnimationFrame(flushRafRef.current);
+      }
+    };
+  }, [modelId]);
+
+  const flushPending = () => {
+    flushRafRef.current = 0;
+    const batch = pendingRef.current;
+    if (batch.length === 0) {
+      return;
+    }
+    pendingRef.current = [];
+    setRows((prev) => [...prev, ...batch]);
+  };
+
+  const queueRows = (entries) => {
+    pendingRef.current.push(...entries);
+    if (!flushRafRef.current) {
+      flushRafRef.current = requestAnimationFrame(flushPending);
+    }
+  };
+
+  const appendRow = (entry, inputData = null) => {
+    const id = ++resultIdRef.current;
+    if (entry.error) {
+      setRows((prev) => [...prev, { id, values: {}, error: entry.error }]);
+      return;
+    }
+    const normalized = normalizePrediction(entry.data);
+    if (inputData && normalized.values) {
+      normalized.values.input = inputData;
+    }
+    setRows((prev) => [...prev, { id, ...normalized }]);
+  };
+
+  const beginRun = () => {
+    if (flushRafRef.current) {
+      cancelAnimationFrame(flushRafRef.current);
+      flushRafRef.current = 0;
+    }
+    pendingRef.current = [];
+    setRows([]);
+    setStartedAt(Date.now());
+    setFinishedAt(null);
+  };
+
+  const endRun = () => {
+    setFinishedAt(Date.now());
+  };
+
+  const clearFile = () => {
+    setFile(null);
+  };
+
+  const handleOnlineModeChange = (nextOnline) => {
+    setOnlineMode(nextOnline);
+    if (modelMeta) {
+      setSchema(toJsonSchema(modelMeta, nextOnline));
+    }
+  };
+
+  const handleSubmit = ({ formData }) => {
+    if (file) {
+      return;
+    }
+    setSubmitError(null);
+    beginRun();
+
+    if (onlineMode) {
+      const updateUrl = persistUpdate
+        ? `/api/v1/smile/${modelId}/update?persist=true`
+        : `/api/v1/smile/${modelId}/update`;
+      fetch(updateUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(formData),
+      })
+        .then(async (res) => {
+          if (!res.ok) {
+            const msg = await res.text();
+            throw new Error(msg || "Failed to update model");
+          }
+          return res.json();
+        })
+        .then((data) => {
+          appendRow({ data }, formData);
+          endRun();
+        })
+        .catch((err) => {
+          setSubmitError(err.message);
+          endRun();
+        });
+      return;
+    }
+
+    const shapMethod = shapMethodForAlgorithm(modelMeta?.algorithm);
+    const shapOptions = isKernelShapAlgorithm(modelMeta?.algorithm)
+      ? { samples: shapSamples, ridge: shapRidge }
+      : null;
+    const url = buildExplainUrl(
+      `/api/v1/smile/${modelId}`,
+      Boolean(shapMethod) && explain,
+      shapOptions
+    );
+
+    fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(formData),
+    })
+      .then((res) => {
+        if (!res.ok) {
+          throw new Error("Failed to make an inference");
+        }
+        return res.json();
+      })
+      .then((data) => {
+        appendRow({ data }, formData);
+        endRun();
+      })
+      .catch((err) => {
+        setSubmitError(err.message);
+        endRun();
+      });
+  };
+
+  const handleFilePredict = async () => {
+    if (!file || streaming) {
+      return;
+    }
+    setSubmitError(null);
+    const keys = schemaKeys(modelMeta, onlineMode);
+    const { isCsv, isJson } = detectBatchFileKind(file);
+
+    if (!isCsv && !isJson) {
+      setSubmitError("Choose a .csv, .json, or .jsonl file");
+      return;
+    }
+
+    abortRef.current?.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
+
+    beginRun();
+    setStreaming(true);
+    setStreamCount(0);
+
+    try {
+      const text = await file.text();
+      let body;
+      let contentType;
+      if (isCsv) {
+        body = prepareCsv(text, keys);
+        contentType = "text/plain";
+      } else {
+        body = toJsonLines(text);
+        contentType = "application/json";
+      }
+      if (!body.trim()) {
+        throw new Error("File has no data rows");
+      }
+
+      if (onlineMode) {
+        const updateStreamUrl = persistUpdate
+          ? `/api/v1/smile/${modelId}/update/stream?persist=true`
+          : `/api/v1/smile/${modelId}/update/stream`;
+        const res = await fetch(updateStreamUrl, {
+          method: "POST",
+          headers: { "Content-Type": contentType },
+          body,
+          signal: controller.signal,
+        });
+        if (!res.ok) {
+          const msg = await res.text();
+          throw new Error(msg || `Update failed (${res.status})`);
+        }
+        const data = await res.json();
+        appendRow({ data });
+        return;
+      }
+
+      const shapMethod = shapMethodForAlgorithm(modelMeta?.algorithm);
+      const shapOptions = isKernelShapAlgorithm(modelMeta?.algorithm)
+        ? { samples: shapSamples, ridge: shapRidge }
+        : null;
+      const streamUrl = buildExplainUrl(
+        `/api/v1/smile/${modelId}/stream`,
+        Boolean(shapMethod) && explain,
+        shapOptions
+      );
+
+      const res = await fetch(streamUrl, {
+        method: "POST",
+        headers: { "Content-Type": contentType },
+        body,
+        signal: controller.signal,
+      });
+      if (!res.ok) {
+        const msg = await res.text();
+        throw new Error(msg || `Stream failed (${res.status})`);
+      }
+
+      let n = 0;
+      await readSseStream(
+        res,
+        (payload) => {
+          n += 1;
+          setStreamCount(n);
+          const id = ++resultIdRef.current;
+          queueRows([{ id, ...normalizePrediction(tryParseJson(payload)) }]);
+        },
+        controller.signal
+      );
+      flushPending();
+    } catch (err) {
+      if (err.name !== "AbortError") {
+        setSubmitError(err.message || String(err));
+      }
+    } finally {
+      if (flushRafRef.current) {
+        cancelAnimationFrame(flushRafRef.current);
+        flushRafRef.current = 0;
+      }
+      flushPending();
+      setStreaming(false);
+      endRun();
+    }
+  };
+
+  if (loading) return <p className="toast">Loading form…</p>;
+  if (error) return <p className="toast">Error: {error}</p>;
+  if (!schema) return null;
+
+  const keys = schemaKeys(modelMeta, onlineMode);
+  const shapMethod = shapMethodForAlgorithm(modelMeta?.algorithm);
+
+  return (
+    <div className="infer-form">
+      <div className="infer-layout">
+        <section className="infer-inputs">
+          <Form
+            schema={schema}
+            validator={validator}
+            formData={formData}
+            onChange={({ formData: next }) => setFormData(next)}
+            onSubmit={handleSubmit}
+            disabled={streaming}
+          >
+            <InferActionFooter
+              file={file}
+              formData={formData}
+              schema={schema}
+              onFileChange={setFile}
+              onClearFile={clearFile}
+              onRunFile={handleFilePredict}
+              streaming={streaming}
+              streamCount={streamCount}
+              onStop={() => abortRef.current?.abort()}
+              disabled={streaming}
+              explain={Boolean(shapMethod) && explain}
+              onExplainChange={shapMethod ? setExplain : null}
+              shapMethod={shapMethod}
+              shapSamples={shapSamples}
+              onShapSamplesChange={setShapSamples}
+              shapRidge={shapRidge}
+              onShapRidgeChange={setShapRidge}
+              onlineMode={onlineMode}
+              onOnlineModeChange={modelMeta?.online ? handleOnlineModeChange : null}
+              persistUpdate={persistUpdate}
+              onPersistUpdateChange={setPersistUpdate}
+              batchHint={
+                <>
+                  Upload CSV (column order:{" "}
+                  <code>{keys.join(", ") || "schema fields"}</code>) or JSON /
+                  JSON-lines. With a file selected, the primary button runs the
+                  batch; otherwise it submits the form.
+                </>
+              }
+            />
+          </Form>
+
+          {submitError && <p className="infer-error">{submitError}</p>}
+        </section>
+
+        <PredictionResults
+          rows={rows}
+          streaming={streaming}
+          startedAt={startedAt}
+          finishedAt={finishedAt}
+          featureNames={keys}
+          shapMethod={shapMethod}
+          onClear={() => {
+            setRows([]);
+            setStartedAt(null);
+            setFinishedAt(null);
+          }}
+        />
+      </div>
+    </div>
+  );
+}
+
+export default SmileForm;

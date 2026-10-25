@@ -1,292 +1,654 @@
-SmileMiner
-==========
+# Statistical Machine Intelligence & Learning Engine <img align="left" width="40" src="/studio/src/main/resources/smile/studio/images/smile.png" alt="SMILE">
+[![Maven Central](https://img.shields.io/maven-central/v/com.github.haifengl/smile-core)](https://central.sonatype.com/artifact/com.github.haifengl/smile-core)
+[![CI](https://github.com/haifengl/smile/actions/workflows/ci.yml/badge.svg)](https://github.com/haifengl/smile/actions/workflows/ci.yml)
+[![CodeQL](https://github.com/haifengl/smile/actions/workflows/codeql.yml/badge.svg)](https://github.com/haifengl/smile/actions/workflows/codeql.yml)
 
-SmileMiner (Statistical Machine Intelligence and Learning Engine) is a set of pure Java libraries of various state-of-art machine learning algorithms. SmileMiner is self contained and requires only Java standard library. The major components include
+SMILE (**Statistical Machine Intelligence & Learning Engine**) is a comprehensive,
+high-performance machine learning and AI platform for the JVM. Built on **Java 25**
+with idiomatic APIs for **Kotlin** and **Scala** (v4.x supports Java 21; earlier
+versions support Java 8), SMILE covers the entire lifecycle of machine intelligence:
+building models with agentic AutoML, embedding algorithms directly in your
+application, and serving classical ML, ONNX graphs, and LLMs on your own machines.
 
-* **Smile**
-The core machine learning library
-* **SmileMath**
-Mathematical functions (basic, special, kernel, distance, rbf, etc.), sorting, random number generators, optimization, linear algebra, statistical distributions, and hypothesis testing.
-* **SmileData**
-Parsers for arff, libsvm, delimited text, sparse matrix, microarray gene expression data.
-* **SmileGraph**
-Graph algorithms on adjacency list and matrix.
-* **SmileInterpolation**
-One and two dimensional interpolation.
-* **SmileNLP**
-Natural language processing.
-* **SmilePlot**
-Swing-based data visualization library.
+### Vision: Intelligence Where the Work Is
 
-SmileMiner is well documented and you can browse the <a href="http://haifengl.github.io/smile/doc/index.html">javadoc</a> for more information. Tutorials are available on the project <a href="http://github.com/haifengl/smile/wiki">wiki</a>. A basic tutorial is also included at the bottom of this file.
+A decision should not require a cloud round-trip or a fragile bridge to an external
+Python stack. The score, the explanation, and the model update belong on the machine
+that already holds the facts: inside a JVM microservice, a branch server, a payment
+terminal, a vehicle gateway, or an air-gapped node. SMILE makes real-time,
+autonomous machine intelligence native to the systems enterprises already run, from
+resource-constrained edge gateways to multi-GPU clusters.
 
-To see SmileMiner in action, please download the <a href="http://haifengl.github.io/smile/smile-demo.jar">demo</a> jar file and then run <tt>java -jar smile-demo.jar</tt>.
+### What We Value
 
-You can use the libraries through Maven central repository by adding the following to your project pom.xml file.
+- **Sovereign & Self-Hosted by Default:** Your data, models, API keys, and telemetry stay on your machines and your network. Everything is built to run locally and keep working when the external link is down.
+- **Zero-Bloat Craftsmanship:** The core engine is pure, self-contained JVM bytecode built on compact, cache-friendly data structures. You get deterministic low latency and a tiny memory footprint by default, with optional plug-and-play native acceleration (OpenBLAS/LAPACK, ONNX Runtime, LibTorch/CUDA) when hardware is available.
+- **Explainable & Auditable in Place:** High-stakes decisions cannot be black boxes. SMILE provides both exact **TreeSHAP** for tree ensembles and model-agnostic **KernelSHAP** for any classifier or regressor, computing local feature attributions in-process alongside predictions, while AutoML workflows generate readable Java, Scala, Kotlin, or Python notebooks you can inspect line by line.
+- **Open Source with Enterprise Backing:** Open-source licensing supports academic research and community collaboration, while commercial licensing from [HALO.AI](https://www.aihalo.dev/) removes copyleft and source-disclosure obligations for proprietary, embedded, and mission-critical production deployments.
+
+### Key Strengths
+
+- **Comprehensive Breadth in One Engine:** Hundreds of algorithms spanning classification, regression, clustering, manifold learning, time series, anomaly detection, NLP, statistical testing, linear algebra, deep learning, computer vision, and native LLM inference (`MiniMax M3`, `Qwen`, `Llama`, tiktoken, Radix KV cache, MTP speculative decoding).
+- **State-of-the-Art Speed & Footprint:** Engineered with primitive-backed memory layouts, Panama FFM, and the Java Vector API (SIMD), SMILE routinely outperforms R, Python, Spark, and H2O while scaling down to a **0.2 GB** GraalVM native micro-container that boots in **0.4 s** and idles at **~80 MiB RAM**.
+- **On-Device Training & Adaptation:** Unlike static inference-only runtimes, SMILE trains and updates models (Random Forests, Gradient Boosting, K-Means, DBSCAN, anomaly detectors) directly on live edge or application data.
+- **Built for Agentic & Production Workloads:** Continuous batching, prefix-preserving Radix KV caches, and speculative decoding that retains its speedup under full batch load, paired with atomic model hot-swapping, Kubernetes health probes, and Prometheus metrics.
+
+### Three Pillars of SMILE
+
+#### 1. Core Engine: Embed in Your Application
+Call classification, regression, clustering, deep learning, NLP, and visualization directly in-process from Java, Scala, or Kotlin with no separate service to operate.
+
+#### 2. SMILE Serve: Unified Inference Runtime
+A production-ready, Quarkus-based inference server (available as JVM, CUDA GPU, and GraalVM native containers) that brings together three complementary inference capabilities in a single process:
+
+| Capability | API prefix | Description                                                    |
+|---|---|----------------------------------------------------------------|
+| **Classic ML** | `/api/v1/smile` | Serialized SMILE models (`.sml`) — classification, regression, clustering (`ClusteringModel`), vector quantization (`VectorQuantizerModel`), and anomaly detection (`AnomalyModel`), with local SHAP explanations (`TreeSHAP` & `KernelSHAP`) |
+| **ONNX Runtime** | `/api/v1/onnx` | Any model in the ONNX open format (`.onnx`)                    |
+| **LLM Chat** | `/api/v1/chat` | OpenAI-compatible chat completions, tool calling, and SSE streaming |
+| **Models** | `/api/v1/models` | OpenAI-compatible list and retrieve for every loaded model — chat, ONNX, and SMILE |
+| **Metrics** | `/q/metrics` | Prometheus scrape for classic, ONNX, and LLM models |
+
+A React-based web UI is bundled and served from the same process.
+See [serve/README.md](serve/README.md) for how to build and run the service.
+
+#### 3. SMILE Studio: Agentic IDE & AutoML Workplace
+A desktop workplace for data science and software engineering using Python, Java, Kotlin, or Scala. Specialized AI agents collaborate with you in interactive notebooks to explore data, engineer features, train and tune models, and export `.sml` or `.onnx` artifacts directly to SMILE Serve.
+See [studio/README.md](studio/README.md) to get your first project running in a few minutes.
+
+---
+
+## Table of Contents
+
+1. [Features](#features)
+2. [Module Map](#module-map)
+3. [Installation](#installation)
+   - [Maven](#maven)
+   - [SBT (Scala)](#sbt-scala)
+   - [Gradle (Kotlin)](#gradle-kotlin)
+   - [Native Libraries (BLAS / LAPACK)](#native-libraries-blas--lapack)
+4. [Quick Start](#quick-start)
+5. [SMILE Studio & Shell](#smile-studio--shell)
+6. [Model Serialization](#model-serialization)
+7. [Visualization](#visualization)
+8. [License](#license)
+9. [Issues & Discussions](#issues--discussions)
+10. [Contributing](#contributing)
+11. [Maintainers](#maintainers)
+12. [Gallery](#gallery)
+
+---
+
+## Features
+
+| Area | Highlights |
+|---|---|
+| **LLM** | LLaMA-3 inference, tiktoken BPE tokenizer, OpenAI-compatible REST server, SSE chat streaming |
+| **Deep Learning** | LibTorch/GPU backend, EfficientNet-V2 image classification, custom layer API |
+| **Classification** | SVM, Decision Trees, Random Forest, AdaBoost, Gradient Boosting, Logistic Regression, Neural Networks, RBF Networks, MaxEnt, KNN, Naïve Bayes, LDA/QDA/RDA |
+| **Regression** | SVR, Gaussian Process, Regression Trees, GBDT, Random Forest, RBF, OLS, LASSO, ElasticNet, Ridge |
+| **Clustering** | BIRCH, CLARANS, DBSCAN, DENCLUE, Deterministic Annealing, K-Means, X-Means, G-Means, Neural Gas, Growing Neural Gas, Hierarchical, SIB, SOM, Spectral, Min-Entropy |
+| **Manifold Learning** | IsoMap, LLE, Laplacian Eigenmap, t-SNE, UMAP, PCA, Kernel PCA, Probabilistic PCA, GHA, Random Projection, ICA |
+| **Feature Engineering** | Genetic Algorithm selection, Ensemble selection, TreeSHAP, KernelSHAP, SNR, Sum-Squares ratio, data transformations, formula API |
+| **NLP** | Sentence / word tokenization, Bigram test, Phrase & Keyword extraction, Stemmer, POS tagging, Relevance ranking |
+| **Association Rules** | FP-growth frequent itemset mining |
+| **Sequence Learning** | Hidden Markov Model, Conditional Random Field |
+| **Nearest Neighbor** | BK-Tree, Cover Tree, KD-Tree, SimHash, LSH |
+| **Numerical Methods** | Linear algebra, numerical optimization (BFGS, L-BFGS), interpolation, wavelets, RBF, distributions, hypothesis tests |
+| **Visualization** | Swing plots (scatter, line, bar, box, histogram, surface, heatmap, contour, …) and declarative Vega-Lite charts |
+
+---
+
+## Module Map
+
+Each module has its own detailed user guide.  Click the **README** link for
+the module overview, or drill into individual topic guides.
+
+### `base/` — Foundation
+> Data structures, math, linear algebra, statistical utilities, I/O
+
+| Document | Topics |
+|---|---|
+| [README](base/README.md) | Module overview and dependency setup |
+| [DATA_FRAME.md](base/DATA_FRAME.md) | DataFrame API — creation, selection, transformation |
+| [DATA_IO.md](base/DATA_IO.md) | CSV, JSON, Parquet, Arrow, JDBC, Avro readers/writers |
+| [DATA_TRANSFORMATION.md](base/DATA_TRANSFORMATION.md) | Scalers, encoders, imputers, feature transforms |
+| [DATASET.md](base/DATASET.md) | Built-in benchmark and real-world datasets |
+| [FORMULA.md](base/FORMULA.md) | R-style formula language for model matrices |
+| [DISTRIBUTIONS.md](base/DISTRIBUTIONS.md) | Probability distributions (Normal, Poisson, Beta, …) |
+| [HYPOTHESIS_TESTING.md](base/HYPOTHESIS_TESTING.md) | t-test, chi-squared, ANOVA, KS-test, … |
+| [DISTANCES.md](base/DISTANCES.md) | Euclidean, Mahalanobis, Hamming, edit distance, … |
+| [NEAREST_NEIGHBOR.md](base/NEAREST_NEIGHBOR.md) | KD-Tree, Cover Tree, BK-Tree, LSH |
+| [KERNELS.md](base/KERNELS.md) | Gaussian, polynomial, Laplacian, and other kernel functions |
+| [RBF.md](base/RBF.md) | Radial basis function networks |
+| [INTERPOLATION.md](base/INTERPOLATION.md) | Linear, cubic spline, bilinear, bicubic |
+| [GRAPH.md](base/GRAPH.md) | Adjacency list/matrix graph, BFS/DFS, spanning trees |
+| [SORT.md](base/SORT.md) | Quick sort, heap sort, counting sort, index sort |
+| [HASH.md](base/HASH.md) | Locality-sensitive hashing, SimHash |
+| [RNG.md](base/RNG.md) | Random number generators, sampling, permutations |
+| [BFGS.md](base/BFGS.md) | L-BFGS and BFGS numerical optimizers |
+| [ICA.md](base/ICA.md) | Independent Component Analysis |
+| [TENSOR.md](base/TENSOR.md) | N-dimensional array (CPU tensor without LibTorch) |
+| [WAVELET.md](base/WAVELET.md) | DWT, CWT, and wavelet families |
+| [GAP.md](base/GAP.md) | GAP statistic for optimal cluster count estimation |
+| [COMPRESSED_SENSING.md](base/COMPRESSED_SENSING.md) | Compressed sensing and basis pursuit |
+
+### `core/` — Machine Learning Algorithms
+> Classification, regression, clustering, manifold learning, and more
+
+| Document | Topics |
+|---|---|
+| [README](core/README.md) | Module overview |
+| [CLASSIFICATION.md](core/CLASSIFICATION.md) | SVM, Random Forest, AdaBoost, GBDT, KNN, Naïve Bayes, LDA, … |
+| [REGRESSION.md](core/REGRESSION.md) | SVR, Gaussian Process, LASSO, Ridge, ElasticNet, GBDT, … |
+| [CLUSTERING.md](core/CLUSTERING.md) | K-Means, DBSCAN, BIRCH, SOM, Spectral Clustering, … |
+| [FEATURE_ENGINEERING.md](core/FEATURE_ENGINEERING.md) | Feature selection, PCA, ICA, projection, encoding |
+| [MANIFOLD.md](core/MANIFOLD.md) | t-SNE, UMAP, IsoMap, LLE, Laplacian Eigenmap |
+| [ANOMALY_DETECTION.md](core/ANOMALY_DETECTION.md) | IsolationForest, one-class SVM, local outlier factor |
+| [ASSOCIATION_RULE_MINING.md](core/ASSOCIATION_RULE_MINING.md) | FP-growth, association rules, frequent itemsets |
+| [SEQUENCE.md](core/SEQUENCE.md) | HMM (Baum-Welch, Viterbi), CRF |
+| [TIME_SERIES.md](core/TIME_SERIES.md) | ARIMA, box-plots, autocorrelation |
+| [REGRESSION.md](core/REGRESSION.md) | Full regression API reference |
+| [TRAINING.md](core/TRAINING.md) | Cross-validation, bootstrap, hyper-parameter search |
+| [VALIDATION.md](core/VALIDATION.md) | Hold-out, k-fold, leave-one-out evaluation |
+| [VALIDATION_METRICS.md](core/VALIDATION_METRICS.md) | Accuracy, AUC, F1, RMSE, MAE, confusion matrix |
+| [HYPER_PARAMETER_OPTIMIZATION.md](core/HYPER_PARAMETER_OPTIMIZATION.md) | Grid search, random search, Bayesian optimization |
+| [VECTOR_QUANTIZATION.md](core/VECTOR_QUANTIZATION.md) | LVQ, Neural Gas, SOM as vector quantizers |
+
+### `deep/` — Deep Learning & LLMs
+> LibTorch-backed GPU/CPU tensor operations, neural network layers, LLaMA-3 inference, EfficientNet, ONNX Runtime & GenAI
+
+| Document | Topics |
+|---|---|
+| [README](deep/README.md) | Core deep-learning guide (tensors, layers, loss, optimizer, model, metrics, data loading) |
+| [LLM.md](deep/LLM.md) | `smile.llm` — tokenizer, LLaMA-3, Qwen3.5, inference engine, KV cache, quantization, tensor parallelism |
+| [VISION.md](deep/VISION.md) | `smile.vision` — transforms, `ImageDataset`, EfficientNet-V2, ImageNet labels |
+| [ONNX.md](deep/ONNX.md) | ONNX Runtime inference (`smile.onnx`) — sessions, tensors, execution providers |
+| [ONNX_GENAI.md](deep/ONNX_GENAI.md) | ONNX Runtime GenAI (`smile.onnx.genai`) — generate loop, chat model, multimodal |
+
+The `deep/README.md` covers:
+- **`smile.deep.tensor`** — Tensor factory, indexing, arithmetic, AutoScope memory management, dtype/device
+- **`smile.deep.layer`** — Linear, Conv2d, pooling, normalization (BN/GN/RMS), dropout, embedding, sequential blocks
+- **`smile.deep.activation`** — ReLU, GELU, SiLU, Tanh, Sigmoid, Softmax, GLU, HardShrink, …
+- **`smile.deep.Loss`** — MSE, cross-entropy, BCE, Huber, KL, hinge, and more
+- **`smile.deep.Optimizer`** — SGD, Adam, AdamW, RMSprop
+- **`smile.deep.Model`** — Abstract base class + training loop
+- **`smile.deep.metric`** — Accuracy, Precision, Recall, F1Score with macro/micro/weighted averaging
+- **`smile.deep.Dataset`** — Dataset interface, `DataSampler`, `SampleBatch`
+
+The `deep/LLM.md` covers:
+- **`smile.llm`** — `Message`, `Role`, `FinishReason`, `ChatCompletion`, `ChatOptions`, `LanguageModel`
+- **`smile.llm.tokenizer`** — `Tokenizer` interface, `Tiktoken` BPE implementation (LLaMA-3 compatible)
+- **`smile.llm.model.llama`** — Full LLaMA-3 stack: `Llama.build()`, `generate()`, `chat()`, streaming
+- **`smile.llm.model.qwen`** — Qwen3.5 hybrid stack (Gated DeltaNet + gated attention), MTP, vision tower
+- **`smile.llm.engine`** — Continuous-batching `InferenceEngine`, `GenerationRequest`/`GenerationHandle`, speculative decoding
+- **`smile.llm.cache`** — Paged `KvCachePool`, `RadixCache` prefix reuse
+- **`smile.llm.quant`** / **`smile.llm.parallel`** — FP8/NVFP4/Marlin quantization, tensor parallelism
+
+The `deep/VISION.md` covers:
+- **`smile.vision`** — `VisionModel`, `ImageDataset`, `EfficientNet.V2S/M/L()` pretrained models, ImageNet labels
+- **`smile.vision.transform`** — `Transform` interface, `ImageClassification` pipeline, resize/crop/toTensor helpers
+
+### `nlp/` — Natural Language Processing
+> Text normalization, tokenization, POS tagging, stemming, relevance ranking
+
+| Document | Topics |
+|---|---|
+| [README](nlp/README.md) | Module overview |
+| [TOKENIZER.md](nlp/TOKENIZER.md) | Sentence splitter, word tokenizer, regex tokenizer |
+| [POS.md](nlp/POS.md) | Part-of-speech tagging (Brill tagger, HMM tagger) |
+| [STEM.md](nlp/STEM.md) | Porter, Lancaster, Lovins stemmers; lemmatization |
+| [COLLOCATION.md](nlp/COLLOCATION.md) | Bigram/trigram statistical tests, phrase extraction |
+| [RELEVANCE.md](nlp/RELEVANCE.md) | TF-IDF, BM25, keyword extraction |
+| [TAXONOMY.md](nlp/TAXONOMY.md) | WordNet integration, synsets, hypernyms |
+
+### `plot/` — Data Visualization
+> Swing-based interactive plots and declarative Vega-Lite charts
+
+| Document | Topics |
+|---|---|
+| [README](plot/README.md) | Swing plotting API — scatter, line, bar, box, histogram, heatmap, surface, contour, wireframe |
+| [VEGA.md](plot/VEGA.md) | Declarative `smile.plot.vega` (Vega-Lite) — JSON spec generation, web/Jupyter rendering |
+
+### `serve/` — Inference Server
+> Quarkus-based REST inference service with OpenAI-compatible API and SSE streaming
+
+| Document | Topics |
+|---|---|
+| [README](serve/README.md) | Building and running the server, `/chat/completions` endpoint, SSE streaming, configuration |
+
+### `studio/` — Interactive Shell & Desktop IDE
+> An agentic IDE for data science using Python or SMILE
+
+| Document                      | Topics |
+|-------------------------------|---|
+| [README.md](studio/README.md) | Desktop Studio UX                                                    |
+| [CLI](studio/CLI.md)    | CLI entry points (`smile`, `smile shell`, `smile scala`, `smile serve`) |
+
+### `scala/` — Scala API
+> Idiomatic Scala shim — concise wrappers, symbolic operators, Scala collections integration
+
+| Document | Topics |
+|---|---|
+| [README](scala/README.md) | API overview, `smile.classification`, `smile.regression`, `smile.clustering`, `smile.plot` in Scala |
+
+### `kotlin/` — Kotlin API
+> Idiomatic Kotlin shim — extension functions, named parameters, builder DSLs
+
+| Document | Topics |
+|---|---|
+| [README](kotlin/README.md) | API overview, extension functions, Kotlin-style builders |
+| [packages.md](kotlin/packages.md) | Full package-by-package listing of all Kotlin extension functions |
+
+### `json/` — JSON Library (Scala)
+> Lightweight zero-dependency JSON library for Scala with a clean DSL
+
+| Document | Topics |
+|---|---|
+| [README](json/README.md) | Parsing, building, pattern matching, path navigation, serialization |
+
+### `spark/` — Apache Spark Integration
+> Use SMILE models inside Spark ML pipelines
+
+| Document | Topics |
+|---|---|
+| [README](spark/README.md) | `SmileTransformer`, `SmileClassifier`, `SmileRegressor`; training and scoring in Spark DataFrames |
+
+---
+
+## Installation
+
+### Maven
+
+```xml
+<!-- Core ML algorithms -->
+<dependency>
+  <groupId>com.github.haifengl</groupId>
+  <artifactId>smile-core</artifactId>
+  <version>7.1.0</version>
+</dependency>
+
+<!-- Deep learning + LLMs (requires LibTorch) -->
+<dependency>
+  <groupId>com.github.haifengl</groupId>
+  <artifactId>smile-deep</artifactId>
+  <version>7.1.0</version>
+</dependency>
+
+<!-- Natural language processing -->
+<dependency>
+  <groupId>com.github.haifengl</groupId>
+  <artifactId>smile-nlp</artifactId>
+  <version>7.1.0</version>
+</dependency>
+
+<!-- Data visualization -->
+<dependency>
+  <groupId>com.github.haifengl</groupId>
+  <artifactId>smile-plot</artifactId>
+  <version>7.1.0</version>
+</dependency>
 ```
-    <dependency>
-      <groupId>com.github.haifengl</groupId>
-      <artifactId>smile-core</artifactId>
-      <version>1.0.3</version>
-    </dependency>
-```
-You can similarily replace artifactId smile-core with smile-math, smile-data, smile-graph, smile-interpolation, smile-nlp, or smile-plot for other modules.
 
-SmileMiner implements the following major machine learning algorithms
+### SBT (Scala)
 
-* **Classification**
-Support Vector Machines, Decision Trees, AdaBoost, Gradient Boosting, Random Forest, Logistic Regression, Neural Networks, RBF Networks, Maximum Entropy Classifier, KNN, Naïve Bayesian, Fisher/Linear/Quadratic/Regularized Discriminant Analysis.
-
-* **Regression**
-Support Vector Regression, Gaussian Process, Regression Trees, Gradient Boosting, Random Forest, RBF Networks, OLS, LASSO, Ridge Regression.
-
-* **Feature Selection**
-Genetic Algorithm based Feature Selection, Ensemble Learning based Feature Selection, Signal Noise ratio, Sum Squares ratio.
-
-* **Clustering**
-BIRCH, CLARANS, DBScan, DENCLUE, Deterministic Annealing, K-Means, X-Means, G-Means, Neural Gas, Growing Neural Gas, Hierarchical Clustering, Sequential Information Bottleneck, Self-Organizing Maps, Spectral Clustering, Minimum Entropy Clustering.
-
-* **Association Rule & Frequent Itemset Mining**
-FP-growth mining algorithm
-
-* **Manifold learning**
-IsoMap, LLE, Laplacian Eigenmap, PCA, Kernel PCA, Probabilistic PCA, GHA, Random Projection
-
-* **Multi-Dimensional Scaling**
-Classical MDS, Isotonic MDS, Sammon Mapping
-
-* **Nearest Neighbor Search**
-BK-Tree, Cover Tree, KD-Tree, LSH
-
-* **Sequence Learning**
-Hidden Markov Model, Conditional Random Field.
-
-* **Natural Language Processing**
-Sentence Splitter and Tokenizer, Bigram Statistical Test, Phrase Extractor, Keyword Extractor, Stemmer, POS Tagging, Relevance Ranking
-
-Model Serialization
-===================
-You may notice that none of models supports Java Serializable interface. It is because the exact format is hard to keep stable, class changes can easily make your serialized data unreadable, reading/writing the data in non-Java code is almost impossible. Currently, we suggest <a href="http://xstream.codehaus.org">XStream</a> to serialize the trained models. XStream is a simple library to serialize objects to XML and back again. XStream is easy to use and doesn't require mappings (actually requires no modifications to objects). <a href="http://code.google.com/p/protostuff/">Protostuff</a> is a nice alternative that supports forward-backward compatibility (schema evolution) and validation. Beyond XML, Protostuff supports many other formats such as JSON, YAML, protobuf, etc. For some predicitive models, we look forward to supporting PMML (Predictive Model Markup Language), an XML-based file format developed by the Data Mining Group.
-
-SmilePlot
-=========
-
-SmileMiner also has a Swing-based data visualization library SmilePlot, which provides scatter plot, line plot, staircase plot, bar plot, box plot, histogram, 3D histogram, dendrogram, heatmap, hexmap, QQ plot, contour plot, surface, and wireframe. The class PlotCanvas provides builtin functions such as zoom in/out, export, print, customization, etc.
-
-SmilePlot requires SwingX library for JXTable. But if your environment cannot use SwingX, it is easy to remove this dependency by using JTable.
-
-To use SmilePlot, add the following to dependencies
-```
-    <dependency>
-      <groupId>com.github.haifengl</groupId>
-      <artifactId>smile-plot</artifactId>
-      <version>1.0.2</version>
-    </dependency>
+```scala
+libraryDependencies += "com.github.haifengl" %% "smile-scala" % "7.1.0"
 ```
 
-Demo Gallery
-============
-<table class="center">
+### Gradle (Kotlin)
+
+```kotlin
+dependencies {
+    implementation("com.github.haifengl:smile-kotlin:7.1.0")
+}
+```
+
+### Native Libraries (BLAS / LAPACK)
+
+Several algorithms (manifold learning, Gaussian Process, MLP, some clustering)
+require BLAS and LAPACK.
+
+**Linux (Ubuntu / Debian)**
+```shell
+sudo apt update
+sudo apt install libopenblas-dev libarpack2-dev
+```
+
+**macOS (Homebrew)**
+```shell
+brew install arpack
+```
+Do **not** rely on `DYLD_LIBRARY_PATH`: macOS System Integrity Protection (SIP)
+strips `DYLD_*` variables when the JVM is started through the `/usr/bin/java`
+stub, so dyld never sees them. SMILE reaches `libarpack` through the FFM
+bindings, whose `SymbolLookup.libraryLookup("arpack")` calls `dlopen` on the bare
+name `libarpack.dylib`; this does **not** consult `java.library.path`, so
+`-Djava.library.path=...` and `LD_LIBRARY_PATH` have no effect either. SMILE
+therefore preloads the library by absolute path through
+`smile.linalg.NativeLibrary`, which finds it under `/opt/homebrew/lib` or
+`/usr/local/lib` with no copy or symlink. To point it somewhere else, set the
+`arpack.native.path` system property or the `ARPACK_NATIVE_PATH` environment
+variable.
+
+**Windows** — pre-built DLLs are included in the `bin/` directory of the
+[release package](https://github.com/haifengl/smile/releases).
+Add that directory to `PATH`.
+
+**GPU (CUDA)** — make sure the LibTorch CUDA native libraries are on
+PATH (Windows) or LD_LIBRARY_PATH (Linux).
+
+---
+
+## Quick Start
+
+```java
+import smile.classification.RandomForest;
+import smile.data.formula.Formula;
+import smile.io.Read;
+
+// Load data
+var data = Read.csv("src/test/resources/iris.csv");
+
+// Train a random forest
+var forest = RandomForest.fit(Formula.lhs("species"), data);
+
+// Predict
+int label = forest.predict(data.get(0));
+System.out.println("Predicted class: " + label);
+```
+
+For deep learning examples, see [deep/README.md](deep/README.md); for LLM and
+computer-vision examples, see [deep/LLM.md](deep/LLM.md) and
+[deep/VISION.md](deep/VISION.md).
+For visualization examples, see [plot/README.md](plot/README.md).
+
+---
+
+## SMILE Studio
+
+SMILE Studio is an agentic IDE for data science using Python or [SMILE](https://www.aihalo.dev/) on JVM.
+See [studio/README.md](studio/README.md) for full documentation.
+
+Download a pre-packaged release from the
+[releases page](https://github.com/haifengl/smile/releases), then:
+
+```shell
+path/to/smile/bin/setup      # install required native dependencies
+path/to/smile/bin/smile      # launch SMILE Studio from your project directory
+```
+
+Other entry points:
+
+| Command         | Description                                    |
+|-----------------|------------------------------------------------|
+| `smile`         | Desktop agentic IDE                            |
+| `smile shell`   | Java REPL with all SMILE packages pre-imported |
+| `smile scala`   | Scala REPL                                     |
+| `smile train`   | Train a supervised learning model              |
+| `smile predict` | Predict on a file using a saved model          |
+| `smile serve`   | Start the LLM inference server                 |
+
+To increase the JVM heap:
+```shell
+path/to/smile/bin/smile -J-Xmx30G
+```
+
+---
+
+## Model Serialization
+
+Most SMILE models implement `java.io.Serializable`.  You can serialize a
+trained model to disk and load it in a production environment or inside a
+Spark job:
+
+```java
+// Save
+try (var out = new ObjectOutputStream(new FileOutputStream("model.ser"))) {
+    out.writeObject(forest);
+}
+
+// Load
+try (var in = new ObjectInputStream(new FileInputStream("model.ser"))) {
+    var loaded = (RandomForest) in.readObject();
+}
+```
+
+---
+
+## Visualization
+
+SMILE provides two visualization layers:
+
+- **`smile.plot.swing`** — Swing-based interactive 2D/3D plots.  See [plot/README.md](plot/README.md).
+- **`smile.plot.vega`** — Declarative Vega-Lite charts for browsers and Jupyter.  See [plot/VEGA.md](plot/VEGA.md).
+
+```xml
+<dependency>
+  <groupId>com.github.haifengl</groupId>
+  <artifactId>smile-plot</artifactId>
+  <version>7.1.0</version>
+</dependency>
+```
+
+---
+
+## License
+
+SMILE uses a multi-license model that keeps academic research and open-source collaboration free while providing standard, upfront commercial licenses—administered by **HALO.AI LLC**—for proprietary distribution and production deployments:
+
+| Component | Open Source / Evaluation ($0) | Commercial License Tier |
+|---|---|---|
+| **Core Engine** (`base`, `core`, `nlp`, `deep`, `plot`, `kotlin`, `scala`) | **GPLv3** — Free for open-source projects | **OEM & Embedded ($25,000 one-time)** — Perpetual right to embed and ship in proprietary products free of GPLv3 disclosure, plus Year 1 Maintenance & 10 Agent Studio seats (optional 20% / $5,000 yr renewal) |
+| **SMILE Serve** (`serve`) | **AGPLv3** — Free when complying with §13 network source disclosure | **Production Runtime ($12,000 / year)** — Covers up to 4 production server nodes ($250/node/mo) + internal Core Engine + 5 free Agent Studio seats, with zero AGPLv3/GPLv3 disclosure |
+| **SMILE Agent Studio** (`studio`) | **BSL 1.1** — Free for personal, academic, and non-production evaluation (converts to AGPLv3 after 4 years) | **Bundled Free** with Runtime (5 seats), OEM (10 seats), and Enterprise (25 seats), or **$95 / seat / mo** ($995/seat/yr paid annually, 5-seat standalone min) |
+| **Enterprise & Edge Fleet** | — | **From $50,000 / year** — Volume edge-node licensing (100–5,000+ gateways), site-wide OEM rights, 25 Studio seats, and optional $15k 30-day Turnkey Pilot |
+
+All commercial tiers include Critical & High CVE resolution SLAs and a 12-month capped IP indemnity. See [LICENSE](https://github.com/haifengl/smile/blob/master/LICENSE) and **[Commercial Licensing & Pricing](https://www.aihalo.dev/licensing.html)**, or contact **sales@aihalo.dev**.
+
+---
+
+## Issues & Discussions
+
+| Channel | Purpose |
+|---|---|
+| [GitHub Discussions](https://github.com/haifengl/smile/discussions) | Questions, ideas, show-and-tell |
+| [Stack Overflow `[smile]`](https://stackoverflow.com/questions/tagged/smile) | Technical Q&A |
+| [Issue Tracker](https://github.com/haifengl/smile/issues/new) | Bug reports and feature requests |
+| [Online Docs](https://www.aihalo.dev/) | Tutorials and programming guides |
+| [Java API](https://www.aihalo.dev/api/java/index.html) · [Scala API](https://www.aihalo.dev/api/scala/index.html) · [Kotlin API](https://www.aihalo.dev/api/kotlin/index.html) · [Clojure API](https://www.aihalo.dev/api/clojure/index.html) | API Javadoc |
+
+---
+
+## Contributing
+
+Please read [CONTRIBUTING.md](CONTRIBUTING.md) for build and test instructions.
+
+---
+
+## Maintainers
+
+- Haifeng Li ([@haifengl](https://github.com/haifengl))
+- Karl Li ([@kklioss](https://github.com/kklioss))
+
+---
+
+## Gallery
+<table class="center" style="width:100%;">
   <tr>
-    <td>
+    <td colspan="3">
       <figure>
-        <a href="http://haifengl.github.io/smile/gallery/smile-demo-kpca.png"><img src="http://haifengl.github.io/smile/gallery/smile-demo-kpca-small.png" alt="Kernel PCA" width="100%"></a>
-        <figcaption>Kernel PCA</figcaption>
-      </figure>
-    </td>
-    <td>
-      <figure>
-        <a href="http://haifengl.github.io/smile/gallery/smile-demo-isomap.png"><img src="http://haifengl.github.io/smile/gallery/smile-demo-isomap-small.png" alt="IsoMap" width="100%"></a>
-        <figcaption>IsoMap</figcaption>
+        <a href="/website/src/images/splom.png"><img src="/website/src/images/splom.png" alt="SPLOM"></a>
+        <figcaption style="text-align: center;"><h3>Scatterplot Matrix</h3></figcaption>
       </figure>
     </td>
   </tr>
   <tr>
     <td>
       <figure>
-        <a href="http://haifengl.github.io/smile/gallery/smile-demo-mds.png"><img src="http://haifengl.github.io/smile/gallery/smile-demo-mds-small.png" alt="MDS" width="100%"></a>
-        <figcaption>Multi-Dimensional Scaling</figcaption>
+        <a href="/website/src/images/pca.png"><img src="/website/src/images/pca.png" alt="Scatter"></a>
+        <figcaption style="text-align: center;"><h3>Scatter Plot</h3></figcaption>
       </figure>
     </td>
     <td>
       <figure>
-        <a href="http://haifengl.github.io/smile/gallery/smile-demo-som.png"><img src="http://haifengl.github.io/smile/gallery/smile-demo-som-small.png" alt="SOM" width="100%"></a>
-        <figcaption>SOM</figcaption>
-      </figure>
-    </td>
-  </tr>
-  <tr>
-    <td>
-      <figure>
-        <a href="http://haifengl.github.io/smile/gallery/smile-demo-ann.png"><img src="http://haifengl.github.io/smile/gallery/smile-demo-ann-small.png" alt="Neural Network" width="100%"></a>
-        <figcaption>Neural Network</figcaption>
+        <a href="/website/src/images/heart.png"><img src="/website/src/images/heart.png" alt="Heart"></a>
+        <figcaption style="text-align: center;"><h3>Line Plot</h3></figcaption>
       </figure>
     </td>
     <td>
       <figure>
-        <a href="http://haifengl.github.io/smile/gallery/smile-demo-svm.png"><img src="http://haifengl.github.io/smile/gallery/smile-demo-svm-small.png" alt="SVM" width="100%"></a>
-        <figcaption>SVM</figcaption>
+        <a href="/website/src/images/surface.png"><img src="/website/src/images/surface.png" alt="Surface"></a>
+        <figcaption style="text-align: center;"><h3>Surface Plot</h3></figcaption>
       </figure>
     </td>
   </tr>
   <tr>
     <td>
       <figure>
-        <a href="http://haifengl.github.io/smile/gallery/smile-demo-agglomerative-clustering.png"><img src="http://haifengl.github.io/smile/gallery/smile-demo-agglomerative-clustering-small.png" alt="Agglomerative Clustering" width="100%"></a>
-        <figcaption>Agglomerative Clustering</figcaption>
+        <a href="/website/src/images/bar.png"><img src="/website/src/images/bar.png" alt="Scatter"></a>
+        <figcaption style="text-align: center;"><h3>Bar Plot</h3></figcaption>
       </figure>
     </td>
     <td>
       <figure>
-        <a href="http://haifengl.github.io/smile/gallery/smile-demo-xmeans.png"><img src="http://haifengl.github.io/smile/gallery/smile-demo-xmeans-small.png" alt="X-Means" width="100%"></a>
-        <figcaption>X-Means</figcaption>
-      </figure>
-    </td>
-  </tr>
-  <tr>
-    <td>
-      <figure>
-        <a href="http://haifengl.github.io/smile/gallery/smile-demo-dbscan.png"><img src="http://haifengl.github.io/smile/gallery/smile-demo-dbscan-small.png" alt="DBScan" width="100%"></a>
-        <figcaption>DBScan</figcaption>
+        <a href="/website/src/images/box.png"><img src="/website/src/images/box.png" alt="Box Plot"></a>
+        <figcaption style="text-align: center;"><h3>Box Plot</h3></figcaption>
       </figure>
     </td>
     <td>
       <figure>
-        <a href="http://haifengl.github.io/smile/gallery/smile-demo-neural-gas.png"><img src="http://haifengl.github.io/smile/gallery/smile-demo-neural-gas-small.png" alt="Neural Gas" width="100%"></a>
-        <figcaption>Neural Gas</figcaption>
+        <a href="/website/src/images/histogram2d.png"><img src="/website/src/images/histogram2d.png" alt="Histogram"></a>
+        <figcaption style="text-align: center;"><h3>Histogram Heatmap</h3></figcaption>
       </figure>
     </td>
   </tr>
   <tr>
     <td>
       <figure>
-        <a href="http://haifengl.github.io/smile/gallery/smile-demo-wavelet.png"><img src="http://haifengl.github.io/smile/gallery/smile-demo-wavelet-small.png" alt="Wavelet" width="100%"></a>
-        <figcaption>Wavelet</figcaption>
+        <a href="/website/src/images/rolling.png"><img src="/website/src/images/rolling.png" alt="Rolling"></a>
+        <figcaption style="text-align: center;"><h3>Rolling Average</h3></figcaption>
       </figure>
     </td>
     <td>
       <figure>
-        <a href="http://haifengl.github.io/smile/gallery/smile-demo-mixture.png"><img src="http://haifengl.github.io/smile/gallery/smile-demo-mixture-small.png" alt="Mixture" width="100%"></a>
-        <figcaption>Exponential Family Mixture</figcaption>
+        <a href="/website/src/images/map.png"><img src="/website/src/images/map.png" alt="Map"></a>
+        <figcaption style="text-align: center;"><h3>Geo Map</h3></figcaption>
+      </figure>
+    </td>
+    <td>
+      <figure>
+        <a href="/website/src/images/umap.png"><img src="/website/src/images/umap.png" alt="UMAP"></a>
+        <figcaption style="text-align: center;"><h3>UMAP</h3></figcaption>
+      </figure>
+    </td>
+  </tr>
+  <tr>
+    <td>
+      <figure>
+        <a href="/website/src/images/text.png"><img src="/website/src/images/text.png" alt="Text"></a>
+        <figcaption style="text-align: center;"><h3>Text Plot</h3></figcaption>
+      </figure>
+    </td>
+    <td>
+      <figure>
+        <a href="/website/src/images/contour.png"><img src="/website/src/images/contour.png" alt="Contour"></a>
+        <figcaption style="text-align: center;"><h3>Heatmap with Contour</h3></figcaption>
+      </figure>
+    </td>
+    <td>
+      <figure>
+        <a href="/website/src/images/hexmap.png"><img src="/website/src/images/hexmap.png" alt="Hexmap"></a>
+        <figcaption style="text-align: center;"><h3>Hexmap</h3></figcaption>
+      </figure>
+    </td>
+  </tr>
+  <tr>
+    <td>
+      <figure>
+        <a href="/website/src/images/isomap.png"><img src="/website/src/images/isomap.png" alt="IsoMap"></a>
+        <figcaption style="text-align: center;"><h3>IsoMap</h3></figcaption>
+      </figure>
+    </td>
+    <td>
+      <figure>
+        <a href="/website/src/images/umap.png"><img src="/website/src/images/lle.png" alt="LLE"></a>
+        <figcaption style="text-align: center;"><h3>LLE</h3></figcaption>
+      </figure>
+    </td>
+    <td>
+      <figure>
+        <a href="/website/src/gallery/smile-demo-kpca.png"><img src="/website/src/gallery/smile-demo-kpca-small.png" alt="Kernel PCA"></a>
+        <figcaption style="text-align: center;"><h3>Kernel PCA</h3></figcaption>
+      </figure>
+    </td>
+  </tr>
+  <tr>
+    <td>
+      <figure>
+        <a href="/website/src/gallery/smile-demo-ann.png"><img src="/website/src/gallery/smile-demo-ann-small.png" alt="Neural Network"></a>
+        <figcaption style="text-align: center;"><h3>Neural Network</h3></figcaption>
+      </figure>
+    </td>
+    <td>
+      <figure>
+        <a href="/website/src/gallery/smile-demo-svm.png"><img src="/website/src/gallery/smile-demo-svm-small.png" alt="SVM"></a>
+        <figcaption style="text-align: center;"><h3>SVM</h3></figcaption>
+      </figure>
+    </td>
+    <td>
+      <figure>
+        <a href="/website/src/gallery/smile-demo-agglomerative-clustering.png"><img src="/website/src/gallery/smile-demo-agglomerative-clustering-small.png" alt="Hierarchical Clustering"></a>
+        <figcaption style="text-align: center;"><h3>Hierarchical Clustering</h3></figcaption>
+      </figure>
+    </td>
+  </tr>
+  <tr>
+    <td>
+      <figure>
+        <a href="/website/src/gallery/smile-demo-som.png"><img src="/website/src/gallery/smile-demo-som-small.png" alt="SOM"></a>
+        <figcaption style="text-align: center;"><h3>SOM</h3></figcaption>
+      </figure>
+    </td>
+    <td>
+      <figure>
+        <a href="/website/src/gallery/smile-demo-dbscan.png"><img src="/website/src/gallery/smile-demo-dbscan-small.png" alt="DBSCAN"></a>
+        <figcaption style="text-align: center;"><h3>DBSCAN</h3></figcaption>
+      </figure>
+    </td>
+    <td>
+      <figure>
+        <a href="/website/src/gallery/smile-demo-neural-gas.png"><img src="/website/src/gallery/smile-demo-neural-gas-small.png" alt="Neural Gas"></a>
+        <figcaption style="text-align: center;"><h3>Neural Gas</h3></figcaption>
+      </figure>
+    </td>
+  </tr>
+  <tr>
+    <td>
+      <figure>
+        <a href="/website/src/gallery/smile-demo-wavelet.png"><img src="/website/src/gallery/smile-demo-wavelet-small.png" alt="Wavelet"></a>
+        <figcaption style="text-align: center;"><h3>Wavelet</h3></figcaption>
+      </figure>
+    </td>
+    <td>
+      <figure>
+        <a href="/website/src/gallery/smile-demo-mixture.png"><img src="/website/src/gallery/smile-demo-mixture-small.png" alt="Mixture"></a>
+        <figcaption style="text-align: center;"><h3>Exponential Family Mixture</h3></figcaption>
+    </figure>
+    </td>
+      <td>
+      <figure>
+        <a href="/website/src/images/teapot.png"><img src="/website/src/images/teapot.png" alt="Teapot"></a>
+        <figcaption style="text-align: center;"><h3>Teapot Wireframe</h3></figcaption>
+      </figure>
+    </td>
+  </tr>
+  <tr>
+    <td colspan="3">
+      <figure>
+        <a href="/website/src/images/grid-interpolation2d.png"><img src="/website/src/images/grid-interpolation2d.png" alt="Interpolation"></a>
+        <figcaption style="text-align: center;"><h3>Grid Interpolation</h3></figcaption>
       </figure>
     </td>
   </tr>
 </table>
-
-Tutorial
-========
-This tutorial shows how to use SmileMiner for predictive modeling (classification and regression) from Java code. It includes loading data, training and testing the model, and applying the model.
-
-## Load Data
-Most SmileMiner algorithms take simple double[] as input. So you can use your favorite methods or library to import the data as long as the samples are in double arrays. To make the life easier, SmileMiner does provide a couple of parsers for popular data formats, such as Weka's ARFF files, LibSVM's file format, delimited text files, and binary sparse data. These classes are in the package smile.data.parser. The package smile.data.parser.microarray also provides several parsers for microarray gene expression datasets, including GCT, PCL, RES, and TXT files. In the following example, we use the ARFF parser to load the weather dataset:
-```java
-ArffParser arffParser = new ArffParser();
-arffParser.setResponseIndex(4);
-AttributeDataset weather = arffParser.parse(this.getClass().getResourceAsStream("/smile/data/weka/weather.nominal.arff"));
-double[][] x = weather.toArray(new double[weather.size()][]);
-int[] y = weather.toArray(new int[weather.size()]);
-```
-Note that the data file weather.nominal.arff is not included in the release. To try out the example, please just download any arff file from Internet. In the second line, we use setResponseIndex to set the column index (starting at 0) of dependent/response variable. In supervised learning, we need a response variable for each sample to train the model. Basically, it is the _y_ in the mathematical model. For classification, it is the class label. For regression, it is of real value. Without setting it, the data assume no response variable. In that case, the data can be used for testing or unsupervised learning.
-
-The parse method can take a URI, File, path string, or InputStream as input argument. And it returns an AttributeDataset object, which is a dataset of a number of attributes. All attribute values are stored as double even if the attribute may be nominal, ordinal, string, or date. The first call of toArray taking a double[][] argument fills the array with all the parsed data and returns it, of which each row is a sample/object. The second call of toArray taking an int array fills it with the class labels of the samples and then returns it.
-
-The AttributeDataset.attributes method returns the list of Attribute objects in the dataset. The Attribute object contains the type information (and optional weight), which is needed in some algorithms (e.g. decision trees). The Attribute object also contain variable name and description, which are useful in the output or UI.
-
-Similar to ArffParser, we can also use the DelimitedTextParser class to parse plain delimited text files. By default, the parser expects a white-space-separated-values file. Each line in the file corresponds to a row in the table. Within a line, fields are separated by white spaces, each field belonging to one table column. This class can also be used to read other text tabular files by setting delimiter character such ash ','. The file may contain comment lines (starting with '%') and missing values (indicated by placeholder '?'), which both can be parameterized.
-```java
-DelimitedTextParser parser = new DelimitedTextParser();
-parser.setResponseIndex(new NominalAttribute("class"), 0);
-AttributeDataset usps = parser.parse("USPS Train", this.getClass().getResourceAsStream("/smile/data/usps/zip.train"));
-```
-where the setResponseIndex also take an extra parameter about the attribute of response variable. Because this is a classification problem, we set it a NominalAttribute with name "class". In case of regression, we should use NumericAttribute instead.
-
-If your input data contains different types of attributes (e.g. NumericAttribute, NominalAttribute, StringAttribute, DateAttribute, etc), you should pass an array of Attribute[] to the constructor of DelimitedTextParser to indicate the data types of each column. By default, DelimitedTextParser assumes all columns as NumericAttribute.
-
-## Train The Model
-SmileMiner implements a variety of classification and regression algorithms. In what follows, we train a support vector machine (SVM) on the USPS zip code handwriting dataset. The SVM employs a Gaussian kernel and one-to-one strategy as this is a multi-class problem. Different from LibSVM or other popular SVM library, SmileMiner implements an online learning algorithm for training SVM. The method learn trains the SVM with the given dataset for one epoch. The caller may call this method multiple times to obtain better accuracy although one epoch is usually sufficient. Note that after calling learn, we need to call the finish method, which processes support vectors until converge. As it is an online algorithm, the user may update the model anytime by calling learn even after calling the finish method. In the example, we show another way of learning by working on single sample. As shown in the example, we simply call the predict method on a testing sample. Both learn and predict methods are generic for all classification and regression algorithms. 
-```java
-DelimitedTextParser parser = new DelimitedTextParser();
-parser.setResponseIndex(new NominalAttribute("class"), 0);
-try {
-    AttributeDataset train = parser.parse("USPS Train", this.getClass().getResourceAsStream("/smile/data/usps/zip.train"));
-    AttributeDataset test = parser.parse("USPS Test", this.getClass().getResourceAsStream("/smile/data/usps/zip.test"));
-
-    double[][] x = train.toArray(new double[train.size()][]);
-    int[] y = train.toArray(new int[train.size()]);
-    double[][] testx = test.toArray(new double[test.size()][]);
-    int[] testy = test.toArray(new int[test.size()]);
-            
-    SVM<double[]> svm = new SVM<double[]>(new GaussianKernel(8.0), 5.0, Math.max(y)+1, SVM.Multiclass.ONE_VS_ONE);
-    svm.learn(x, y);
-    svm.finish();
-            
-    int error = 0;
-    for (int i = 0; i < testx.length; i++) {
-        if (svm.predict(testx[i]) != testy[i]) {
-            error++;
-        }
-    }
-
-    System.out.format("USPS error rate = %.2f%%\n", 100.0 * error / testx.length);
-            
-    System.out.println("USPS one more epoch...");
-    for (int i = 0; i < x.length; i++) {
-        int j = Math.randomInt(x.length);
-        svm.learn(x[j], y[j]);
-    }
-            
-    svm.finish();
-
-    error = 0;
-    for (int i = 0; i < testx.length; i++) {
-        if (svm.predict(testx[i]) != testy[i]) {
-            error++;
-        }
-    }
-    System.out.format("USPS error rate = %.2f%%\n", 100.0 * error / testx.length);
-} catch (Exception ex) {
-    System.err.println(ex);
-}
-```
-As aforementioned, tree base methods need the type information of attributes. In the next example, we train an AdaBoost model on the weather dataset.
-```java
-ArffParser arffParser = new ArffParser();
-arffParser.setResponseIndex(4);
-AttributeDataset weather = arffParser.parse(this.getClass().getResourceAsStream("/smile/data/weka/weather.nominal.arff"));
-double[][] x = weather.toArray(new double[weather.size()][]);
-int[] y = weather.toArray(new int[weather.size()]);
-
-AdaBoost forest = new AdaBoost(weather.attributes(), x, y, 200, 4);
-```
-In the example, we set the number of trees as 200 and the maximum number of leaf nodes in the trees as 4, which works as a regularization control.
-
-## Model Validation
-In the example of USPS, we have both train and test datasets. However, we frequently have only a single dataset for building model. For model validation, SmileMiner provide LOOCV (leave-one-out cross validation), cross validation, and bootstrap in the package smile.validation. Besides, the package also has various measures to evaluate classification, regression, and clustering. For example, we have accuracy, fallout, FDR, F-measure (F1 score or F-score), precision, recall, sensitivity, specificity for classification; absolute deviation, MSE, RMSE, RSS for regression; rand index, adjust rand index for clustering. The following is an example how to use LOOCV.
-```java
-double[][] x = weather.toArray(new double[weather.size()][]);
-int[] y = weather.toArray(new int[weather.size()]);
-
-int n = x.length;
-LOOCV loocv = new LOOCV(n);
-int error = 0;
-for (int i = 0; i < n; i++) {
-    double[][] trainx = Math.slice(x, loocv.train[i]);
-    int[] trainy = Math.slice(y, loocv.train[i]);
-                
-    AdaBoost forest = new AdaBoost(weather.attributes(), trainx, trainy, 200, 4);
-    if (y[loocv.test[i]] != forest.predict(x[loocv.test[i]]))
-        error++;
-}
-            
-System.out.println("Decision Tree error = " + error);
-```
-
-## Use The Trained Model
-All classifiers in SmileMiner implements the following interface.
-```java
-public interface Classifier<T> {
-    public int predict(T x);
-    public int predict(T x, double[] posteriori);
-}
-```
-To use the trained model, we can apply the method predict on a new sample. Besides just returning class label, many methods (e.g. neural networks) can also output the posteriori probabilities of each class. 

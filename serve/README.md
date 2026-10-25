@@ -1,0 +1,2120 @@
+# SMILE Serve User Guide
+
+<p align="center">
+  <img src="https://github.com/haifengl/smile/blob/master/serve/llama.jpg" width="400"/>
+</p>
+
+SMILE Serve is a production-ready inference server built on [Quarkus](https://quarkus.io/)
+that brings together three complementary inference capabilities on the JVM:
+
+| Capability | API prefix | Description                                                    |
+|---|---|----------------------------------------------------------------|
+| **Classic ML** | `/api/v1/smile` | Serialized SMILE models (`.sml`) — classifiers and regressors |
+| **ONNX Runtime** | `/api/v1/onnx` | Any model in the ONNX open format (`.onnx`)                    |
+| **LLM Chat** | `/api/v1/chat` | OpenAI-compatible chat completions |
+| **Models** | `/api/v1/models` | OpenAI-compatible list and retrieve for every loaded model — chat, ONNX, and SMILE |
+| **Metrics** | `/q/metrics` | Prometheus scrape for classic, ONNX, and LLM models |
+
+A React-based web UI is bundled and served from the same process.
+
+---
+
+## Table of Contents
+
+1. [Quick Start](#1-quick-start)
+   - [Run with Docker](#11-run-with-docker)
+   - [GPU Build & Run](#12-gpu-build--run)
+   - [Test Run a Model](#13-test-run-a-model)
+   - [Health and Metrics Endpoints](#14-health-and-metrics-endpoints)
+2. [LLM Decode Benchmarks](#2-llm-decode-benchmarks)
+3. [Building and Running](#3-building-and-running)
+   - [Dev Mode](#31-dev-mode)
+   - [Packaging as a JAR](#32-packaging-as-a-jar)
+   - [Uber-JAR](#33-uber-jar)
+   - [Native Executable](#34-native-executable)
+4. [Configuration Reference](#4-configuration-reference)
+5. [Classic ML Inference API](#5-classic-ml-inference-api)
+   - [Model Format](#51-model-format)
+   - [Get Model Metadata](#52-get-model-metadata)
+   - [Single Inference (JSON)](#53-single-inference-json)
+   - [Streaming Inference (CSV / JSON-lines)](#54-streaming-inference-csv--json-lines)
+   - [Model IDs](#55-model-ids)
+   - [Model Health and Metrics](#56-model-health-and-metrics)
+   - [Model Lifecycle Control (Reload & Unload)](#57-model-lifecycle-control-reload--unload)
+6. [ONNX Inference API](#6-onnx-inference-api)
+   - [Model Format](#61-model-format)
+   - [Get ONNX Model Info](#62-get-onnx-model-info)
+   - [Single Inference (JSON)](#63-single-inference-json)
+   - [Streaming Inference](#64-streaming-inference)
+   - [Tensor Types and Shape Resolution](#65-tensor-types-and-shape-resolution)
+   - [ONNX Model Health and Metrics](#66-onnx-model-health-and-metrics)
+   - [ONNX Model Lifecycle Control (Reload & Unload)](#67-onnx-model-lifecycle-control-reload--unload)
+7. [LLM Chat API](#7-llm-chat-api)
+   - [Supported Models](#71-supported-models)
+   - [List models](#72-list-models)
+   - [Retrieve model](#73-retrieve-model)
+   - [Dynamic Model Loading](#74-dynamic-model-loading)
+   - [Chat Completions](#75-chat-completions)
+   - [Conversation History API](#76-conversation-history-api)
+   - [LLM Serving Metrics](#77-llm-serving-metrics)
+8. [Web UI](#8-web-ui)
+9. [Database](#9-database)
+10. [Testing](#10-testing)
+
+---
+
+## 1. Quick Start
+
+### 1.1 Run with Docker
+
+The fastest way to run SMILE Serve is via the pre-built Docker image.
+Mount a local directory containing your model files and map the port:
+
+```shell
+docker run -it \
+  -v /path/to/model/folder:/model \
+  -p 8888:8080 \
+  ghcr.io/haifengl/smile-serve:latest
+```
+
+The service starts on port 8080 inside the container (mapped to 8888 on the host).
+Place your `.sml` and `.onnx` model files in `/path/to/model/folder`; they are
+discovered automatically at startup.
+
+#### Image flavors
+
+The release workflow publishes four variants of the image to the GitHub Container Registry,
+`ghcr.io/haifengl/smile-serve`. Pick one with the tag suffix: `latest` or `7.0.0` for the JVM image,
+and e.g. `latest-micro` or `7.0.0-native` for the others.
+
+| Tag | Image | Chat | User accounts, conversations (database) | Size |
+|---|---|---|---|---|
+| `latest` | JVM (OpenJDK 25), CPU | CPU: ONNX Runtime GenAI packages | yes | 0.6 GB |
+| `latest-gpu` | JVM, NVIDIA CUDA | GPU: LibTorch (Llama, Qwen) and ONNX Runtime GenAI | yes | 16 GB |
+| `latest-native` | GraalVM native executable, CPU | CPU: ONNX Runtime GenAI packages | yes | 0.4 GB |
+| `latest-micro` | GraalVM native executable, CPU, inference only | none | none | 0.2 GB |
+
+All four serve SMILE (`.sml`) and ONNX models, the web UI, health probes (`/q/health`) and Prometheus metrics
+(`/q/metrics`). The published images use the `local` profile: users and conversation history are kept in an embedded
+H2 database file, `/model/smile_serve`, so mount `/model` read-write if you want them to survive restarts.
+User accounts exist only to scope conversation history and personal settings (optional Google login; automatic
+login on localhost; see [§7.6](#76-conversation-history-api)). The SMILE and ONNX inference endpoints are not
+authenticated in any flavor, so put the service behind an API gateway or reverse proxy if others can reach it. Memory and startup below were measured on x86-64 with three tiny
+models (a random forest, LDA and a small ONNX model), after startup had settled; your numbers depend on your models.
+
+| | `latest-micro` | `latest-native` | `latest` (JVM) | `latest-gpu` |
+|---|---|---|---|---|
+| Startup (no chat model) | 0.4 s | 0.5 s | 3.4 s | 3.3 s |
+| Idle memory | ~80 MiB | ~115 MiB | ~600 MiB | |
+| With a chat model loaded | n/a | 8 s, 3 GiB (Phi-4-mini, 4.6 GB package) | 11 s, 3.5 GiB (same) | 15 s, ~34 GiB of GPU memory (Llama-3.1-8B-Instruct, BF16, one GPU) |
+| S3 blob storage plugin | no | no | no | yes |
+| Needs | x86-64-v3 CPU | x86-64-v3 CPU | any x86-64 CPU | NVIDIA GPU, driver for CUDA 13.2, NVIDIA Container Toolkit |
+
+**`latest-micro`: inference only.** The smallest and fastest to start. It serves SMILE and ONNX models and the
+inference pages of the web UI; there is no chat, no user accounts or conversation history, and no database, so the
+chat and user endpoints return 404 (and loading a chat model returns 503). Best for resource-constrained or latency-sensitive deployments: edge devices,
+sidecars, serverless or scale-to-zero platforms, and fleets of many small replicas.
+
+**`latest-native`: the full feature set on CPU, as a native executable.** Adds user accounts, conversation storage
+(H2) and CPU chat, with about 5x less memory than the JVM image and sub-second startup (before a chat model loads). Chat on CPU serves pre-converted ONNX Runtime GenAI packages only, for example
+`-e SMILE_CHAT_MODEL=microsoft/Phi-4-mini-instruct-onnx`; Llama and Qwen checkpoints need the GPU image. Best for a small single-node deployment with the web UI,
+and for CPU-only machines.
+
+**`latest`: the JVM image.** The same features as `latest-native` on a conventional JVM: JIT-compiled, runs on any
+x86-64 CPU, usable with the usual JVM tooling. It uses far more memory (it sizes its heap to 80% of the container limit,
+so set a memory limit) and takes a few seconds to start. It is the image to pick for small ONNX Runtime GenAI models on
+CPU, for example embeddings, when the CPU does not support the native executables or you prefer a JVM deployment.
+
+**`latest-gpu`: LLM serving on NVIDIA GPUs.** Runs the LibTorch/CUDA engine for Llama and Qwen checkpoints with CUDA
+graphs, FlashInfer attention and tensor parallelism, plus everything the JVM image does. It needs an NVIDIA GPU, a driver
+that supports CUDA 13.2 and the NVIDIA Container Toolkit (`docker run --gpus all`). GPU memory is set by the model: for
+example Qwen 27B in BF16 needs two 40 GB GPUs. The image is large (about 16 GB) and startup is dominated by loading the
+model. See [§1.2](#12-gpu-build--run).
+
+Notes for all CPU images: they are `linux/amd64` only, and the native executables are compiled for x86-64-v3 (AVX2), so
+they do not run on CPUs without AVX2 (before Intel Haswell, 2013); use the JVM image there.
+
+### 1.2 GPU Build & Run
+
+Build the JVM+GPU image from source and run it. Decode CUDA graphs and FlashInfer attention are on by default
+(`SMILE_DECODE_CUDA_GRAPH=0` turns the graphs off).
+To enable Google login, add `-Dsmile.auth.google.client-id=...
+-Dsmile.auth.google.client-secret=... -Dsmile.auth.google.redirect-uri=...` to
+`JAVA_OPTS_APPEND` yourself (see [§7.6](#authentication)); keep those values
+out of shell history / `docker inspect` by sourcing them from environment
+variables rather than inlining literals.
+
+```shell
+sudo docker build -f serve/src/main/docker/Dockerfile.gpu -t quarkus/smile-serve-gpu .
+sudo docker run -i --rm --gpus all -p 8888:8080 \
+  -e JAVA_OPTS_APPEND="-Dsmile.chat.model=Qwen/Qwen3.8-27B -Dsmile.chat.devices=0 -Dsmile.chat.max-batch-size=48 -XX:ErrorFile=/model/hs_err_%p.log" \
+  -u root -v "/llm/model":/model quarkus/smile-serve-gpu
+```
+
+> **Database Profile & Dependencies:**
+> The image builds the Quarkus app inside Docker with the `local` profile by
+> default (`--build-arg QUARKUS_PROFILE=local`), which configures it to use an
+> embedded H2 database (`jdbc:h2:file:/model/smile_serve`), minimizing runtime
+> dependencies by storing conversation history directly inside the mounted model
+> directory. This is best for personal, local development, or standalone testing.
+>
+> If you want to build an image for production usage, pass
+> `--build-arg QUARKUS_PROFILE=prod`. Under the `prod` profile, `SMILE Serve` will use
+> `PostgreSQL`, which requires running an additional `PostgreSQL` container.
+
+Debug variant (adds `CUDA_LAUNCH_BLOCKING=1` for synchronous CUDA error
+reporting; slower, use only when diagnosing a CUDA graph issue):
+
+```shell
+sudo docker run -i --rm --gpus all -p 8888:8080 \
+  -e CUDA_LAUNCH_BLOCKING=1 \
+  -e JAVA_OPTS_APPEND="-Dsmile.chat.model=Qwen/Qwen3.8-27B -Dsmile.chat.devices=0 -Dsmile.chat.max-batch-size=48 -XX:ErrorFile=/model/hs_err_%p.log" \
+  -u root -v "/llm/model":/model quarkus/smile-serve-gpu
+```
+
+#### Running with PostgreSQL in Kubernetes
+
+When deploying in production with `"-Dquarkus.profile=prod"`, you can run
+`smile-serve` and `postgresql` together in a single Kubernetes Pod so they
+share the network namespace (`localhost`):
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: smile-serve
+  labels:
+    app: smile-serve
+spec:
+  containers:
+    - name: smile-serve
+      image: quarkus/smile-serve-gpu:latest
+      ports:
+        - containerPort: 8080
+          name: http
+      env:
+        - name: SMILE_DB_HOST
+          value: "localhost"
+        - name: SMILE_DB_PORT
+          value: "5432"
+        - name: SMILE_DB_NAME
+          value: "smile_serve"
+        - name: SMILE_DB_USER
+          value: "smile"
+        - name: SMILE_DB_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: smile-db-secret
+              key: password
+        - name: JAVA_OPTS_APPEND
+          value: >-
+            -Dsmile.chat.model=Qwen/Qwen3.8-27B
+            -Dsmile.chat.devices=0
+            -Dsmile.chat.max-batch-size=16
+            -Dquarkus.log.level=INFO
+      livenessProbe:
+        httpGet:
+          path: /q/health/live
+          port: 8080
+        initialDelaySeconds: 15
+        periodSeconds: 10
+      readinessProbe:
+        httpGet:
+          path: /q/health/ready
+          port: 8080
+        initialDelaySeconds: 15
+        periodSeconds: 10
+      resources:
+        limits:
+          nvidia.com/gpu: "1"
+      volumeMounts:
+        - name: model-storage
+          mountPath: /model
+
+    - name: postgresql
+      image: postgres:17-alpine
+      ports:
+        - containerPort: 5432
+          name: postgres
+      env:
+        - name: POSTGRES_DB
+          value: "smile_serve"
+        - name: POSTGRES_USER
+          value: "smile"
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: smile-db-secret
+              key: password
+      resources:
+        requests:
+          cpu: "250m"
+          memory: "512Mi"
+        limits:
+          cpu: "1"
+          memory: "2Gi"
+      volumeMounts:
+        - name: postgres-data
+          mountPath: /var/lib/postgresql/data
+
+  volumes:
+    - name: model-storage
+      persistentVolumeClaim:
+        claimName: smile-model-pvc
+    - name: postgres-data
+      persistentVolumeClaim:
+        claimName: smile-postgres-pvc
+```
+
+### 1.3 Test Run a Model
+
+You can quickly test run a model in development mode using the Gradle wrapper:
+
+```shell
+./gradlew :serve:quarkusDev "-Dsmile.chat.model=microsoft/Phi-4-mini-instruct-onnx"
+```
+
+The service starts in dev mode on port 8888 (with live reload enabled and the
+Quarkus Dev UI accessible at <http://localhost:8888/q/dev/>).
+
+Refer to [deep/README.md](../deep/README.md#prerequisites--dependencies) for how
+to setup Prerequisites & Dependencies. For this example, you should have ONNX
+Runtime and ONNX-GENAI native libraries installed and configured; see
+[deep/ONNX_GENAI.md](../deep/ONNX_GENAI.md) for details.
+
+### 1.4 Health and Metrics Endpoints
+
+Operational endpoints follow the Quarkus `/q/` convention, separate from the
+business API under `/api/v1`. Health probes are provided by SmallRye Health;
+Prometheus metrics (`/q/metrics`) are exposed when a metrics plugin (such as
+`metrics-prometheus`) is included in `serve/plugins/`.
+
+**Health** (SmallRye Health / MicroProfile Health):
+
+```
+GET /q/health          # aggregate of all checks
+GET /q/health/live     # liveness  — process is up
+GET /q/health/ready    # readiness — ready to serve requests
+GET /q/health/started  # startup   — application has started
+```
+
+**Example:**
+
+```shell
+curl http://localhost:8080/q/health
+```
+
+```json
+{
+  "status": "UP",
+  "checks": [
+    { "name": "smile-serve-liveness", "status": "UP" },
+    { "name": "smile-serve-readiness", "status": "UP",
+      "data": { "smile_models": 1, "onnx_models": 1 } }
+  ]
+}
+```
+
+The liveness check never touches model state, so a failed model load does not
+trigger a container restart. The readiness check reports the loaded model
+counts. Use `/q/health/live` for Kubernetes `livenessProbe` and
+`/q/health/ready` for `readinessProbe`.
+
+**Metrics** (Prometheus text format, via optional metrics plugin):
+
+```
+GET /q/metrics
+```
+
+A single scrape target covers every model — classic SMILE, ONNX, and LLM — so
+DevOps does not need per-model URLs. See
+[§5.6](#56-model-health-and-metrics) and [§6.6](#66-onnx-model-health-and-metrics)
+for the per-model series, and [§7](#7-llm-chat-api) for the LLM series.
+
+---
+
+## 2. LLM Decode Benchmarks
+
+Steady-state continuous-batching decode on NVIDIA A100 with FlashInfer,
+`smile.chat.max-batch-size=48`, `max_tokens: 512`, greedy sampling
+(`temperature: 0`), and a uniform decode cohort
+(`smile.chat.admit-coalesce-ms=50` for parallel load tests). **Step** is
+engine decode-step throughput (`batch / step_ms`); **aggregate** is
+`AggregateTokenThroughput` over a ~3 s window (includes streaming / logging
+overhead).
+
+### Llama 3.1 8B Instruct
+
+| Checkpoint | Weight path | Step | Aggregate | Step time | Forward / sample |
+|---|---|---|---|---|---|
+| [meta-llama/Llama-3.1-8B-Instruct](https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct) | BF16 dense | **2087 tok/s** | ~2036 tok/s | 23 ms | 22 / 1 ms |
+| [hugging-quants/Meta-Llama-3.1-8B-Instruct-AWQ-INT4](https://huggingface.co/hugging-quants/Meta-Llama-3.1-8B-Instruct-AWQ-INT4) | AWQ INT4 (Marlin) | **2667 tok/s** | ~2543 tok/s | 18 ms | 17 / 0 ms |
+
+Both runs used a full batch of 48 active requests at locked positions
+(e.g. `positions=[417..417]`). AWQ is ~28% faster at the same concurrency;
+lighter weights also leave more free KV slots for longer context.
+
+### Qwen3.8 27B
+
+| Checkpoint | Setup | Step | Aggregate | Step time | Forward / sample |
+|---|---|---|---|---|---|
+| [Qwen/Qwen3.8-27B](https://huggingface.co/Qwen/Qwen3.8-27B) | BF16, TP=4 | **906 tok/s** | ~896 tok/s | 53 ms | 51 / 1 ms |
+
+Hybrid Qwen3.5 stack (Gated DeltaNet + full attention) at the same concurrency
+and locked positions (e.g. `positions=[466..466]`). Absolute throughput is
+lower than 8B Llama as expected for a ~27B hybrid model across four GPUs;
+per-request generation stays ~17 tok/s with the batch saturated. Qwen AWQ via
+`compressed-tensors` / Marlin is not supported yet (detector currently treats
+cards such as `cyankiwi/Qwen3.8-27B-AWQ-INT4` as dense).
+
+### Qwen3.8 27B with MTP speculative decoding
+
+Qwen3.5/3.8 checkpoints ship a native multi-token-prediction (MTP) head. With
+`smile.chat.speculative=true` the engine drafts `speculative-tokens` tokens with
+that head and verifies them in one target forward pass; accepted tokens are
+byte-for-byte what greedy decoding would have produced (the output is lossless,
+up to rare bf16 near-tie flips between a 3-token window and single-token
+decode). **MTP is a latency feature for low concurrency**: it speeds up a lone
+request about 2-3x, and it automatically stays out of the way once several
+requests are active.
+
+Setup: BF16, TP=4 on A100 40 GB, greedy, `speculative-tokens=2` (the default depth of 3 measures the same or slightly better), prompt
+"What is the history of China?", 512 new tokens, warm run, wall time including
+prefill.
+
+| Single request | Throughput | Verify forward / round | Draft accept rate |
+|---|---|---|---|
+| Plain decode | 18.7 tok/s | n/a | n/a |
+| MTP + persistent draft context (+ checkpoint replay) | 23 tok/s | 91 ms | ~73 % |
+| + fused DeltaNet window + FlashInfer verify attention | 38 tok/s | 49 ms | ~75 % |
+| + verify CUDA graph (default) | **52.8 tok/s (2.8x plain)** | **~32 ms** | ~77 % |
+
+Before the draft head received its prefix context (it only saw the current
+round's own draft tokens), MTP was ~15 % *slower* than plain decode with a
+~50 % accept rate (27.5 vs 32.5 tok/s in an earlier measurement on a quieter
+system; absolute numbers differ between sessions, compare within a table).
+
+A round (draft + one verify + bookkeeping) takes ~48 ms and commits 2.5 tokens
+on average (mean accepted draft depth 1.5 of 2). Throughput gains hold at long
+context (6.6k-token prompt, 256 new tokens: 16.7 s with the verify graph vs
+26.5 s plain).
+
+**Concurrency.** Speculating requests are drafted and verified together as one batched
+round, each with its own persistent draft context, so the gain holds well beyond a single
+request. Aggregate throughput (tok/s, 512 new tokens, identical prompts, decode CUDA graph
+on, `max-batch-size=48`, `admit-coalesce-ms=50`, BF16 TP=4 on A100 40 GB, default
+`mem-fraction-static=0.85`):
+
+| Active requests | Plain decode | `speculative=true` | Speedup |
+|---|---|---|---|
+| 1 | 25 | **53** | 2.1x |
+| 2 | 48 | 62 | 1.3x |
+| 4 | 94 | 121 | 1.3x |
+| 8 | 187 | 216-236 | 1.2x |
+| 16 | 335 | 408-441 | 1.2-1.3x |
+| 32 | 484 | **694** | 1.4x |
+| 48 | 688-702 | **811** | 1.15x |
+
+Per-request speed at 16 requests is ~26-28 tok/s versus ~21 for plain decode. A batched
+round of 16 requests takes ~80 ms (draft ~8 ms, verify forward ~52 ms, bookkeeping ~14-19 ms)
+and commits ~2.5 tokens per request. Outputs match plain decode for the same prompt up to
+bf16 near-tie flips: plain decode itself is not batch-invariant, and a plain batch of 8
+diverges from the same prompts run alone at the same places a speculative batch does.
+
+**Memory.** Each speculating request needs DeltaNet checkpoint buffers: about 0.04 GB per GPU
+per draft slot for a 27B hybrid model, i.e. ~0.11 GB at the default depth 3 (~0.075 GB at
+depth 2), reserved at load for `min(max-batch-size, speculative-max-concurrency)` rows, before the KV pool is
+sized, so the KV budget already excludes it (48 rows at depth 3 = ~5.3 GB per GPU on a 27B hybrid
+model; it shrinks the KV pool, e.g. from ~734k to ~455k token slots on 40 GB GPUs at
+`mem-fraction-static=0.85`). Only the slots a partial accept can restore from are stored (positions
+`1..depth`; the pre-window copy and the final position are not needed). A cohort larger than the
+reservation (only possible after a depth change) is still checked at run time and, if it does not
+fit, the engine logs one warning and serves it with plain batched decode instead of failing
+requests. To keep more KV, lower `smile.chat.speculative-max-concurrency` (smaller reservation) or
+set `smile.chat.speculative=false`.
+
+Speculation is on by default for Qwen3.5/3.8 checkpoints with MTP weights; budget the memory
+above on small GPUs or very large batches, or set `smile.chat.speculative=false`.
+
+Controls (all default to the values that were benchmarked):
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `smile.chat.speculative` | `true` | MTP speculation for Qwen3.5/3.8 checkpoints with MTP weights (ignored for other models). Set `false` to disable. |
+| `smile.chat.speculative-tokens` | `0` (model default; 3 for Qwen3.8-27B) | Draft depth. Measured aggregate tok/s at 1 / 8 / 16 requests: depth 1: 47 / 203 / 387; depth 2: 53 / 216-236 / 408-441; depth 3 (default): 55 / 232 / 446; depth 4: 54 / 241 / 439. Depths 2-4 are within noise; depth 1 is slower. |
+| `smile.chat.speculative-max-concurrency` | `0` (= `max-batch-size`) | Requests that may speculate at once. A request keeps its speculation slot for its whole life; requests beyond the limit use batched plain decode. Speculating only part of a large cohort is slower than all or none, so leave unlimited unless you need to bound checkpoint memory. |
+| `SMILE_DECODE_CUDA_GRAPH` | on | Capture plain decode steps as CUDA graphs (needs FlashInfer attention, the default backend; uniform batches only). A capture failure turns graphs off for the process and decode continues eagerly. `0` disables. |
+| `SMILE_VERIFY_CUDA_GRAPH` | on | Capture the verify forward as one CUDA graph (one capture per session). `0` disables. |
+| `SMILE_MTP_HISTORY` | on | Draft head keeps a persistent per-request KV of the whole prefix (prompt and accepted tokens). `0` restores the context-free legacy head (about half the accept rate). |
+| `SMILE_MTP_VERIFY_CHECKPOINT_REPLAY` | on | On a partial accept, restore the DeltaNet state saved during the verify pass instead of running a second forward. `0` disables. |
+| `SMILE_VERIFY_CUDA_GRAPH_RAGGED` | on | Also graph cohorts of 2+ requests at different positions. `0` limits the graph to a lone request (or equal positions). |
+| `SMILE_VERIFY_CUDA_GRAPH_MAX_BATCH` | `16` | Largest cohort that uses a verify graph. |
+| `SMILE_VERIFY_FLASHINFER_EAGER` | on | Use FlashInfer's paged prefill kernel for verify windows when the graph is not replaying. `0` disables. |
+
+Notes and limits:
+
+- The MTP draft head's KV cache is a second, request-bound pool sized like the
+  main pool (capped at half of the free device memory when it is created, at
+  first use). A request that cannot get one, is multimodal, or takes a plain
+  decode step (for example it holds no speculation slot, or the cohort did not
+  fit in memory) simply continues with plain decode: output is unaffected, it
+  just stops speculating.
+- Cohorts of up to 16 speculating requests replay a verify CUDA graph keyed by batch
+  size (rows may sit at different positions; positions, RoPE rows, KV slots and the page
+  table are rewritten in place before each replay, one ~10 ms capture per batch size).
+  Larger cohorts verify eagerly because each captured batch size keeps its own activation
+  pool. Same-session A/B against the eager batched verify (512 tokens): 4 requests 145 -> 176
+  tok/s, 8 requests 255 -> 331, 16 requests 461 -> 498. The decode CUDA graph is not used
+  while any request is speculating.
+- The chat endpoint returns the final answer without the model's hidden
+  reasoning. When comparing a speculative and a plain response at a short
+  `max_tokens`, differences can appear from the first visible character only
+  because the token limit falls before/after the end of the hidden reasoning;
+  compare at a limit inside the reasoning, or at a long limit.
+- Capture happens once per `(batch, window length)`; the 2-token verify window
+  at the very end of a request triggers one extra capture (~0.1 s).
+- Troubleshooting: `SMILE_DECODE_PROFILE=1` adds a per-round breakdown to the
+  `MTP verify:` log line; `SMILE_VERIFY_CUDA_GRAPH_DEBUG_DIFF=1` (diagnostic,
+  doubles verify cost) logs the numeric gap between graph replay and an eager
+  reference every round; `SMILE_VERIFY_GRAPH_TRACE=1` logs each round's
+  replay / warmup / capture decision.
+
+### Qwen3.8 27B FP8 on one 40 GB A100
+
+[Qwen/Qwen3.8-27B-FP8](https://huggingface.co/Qwen/Qwen3.8-27B-FP8) (block FP8, 29 GB) runs on a single A100-40GB through
+the weight-only FP8 Marlin kernel (`smile.chat.devices=0`, `mem-fraction-static=0.93`, FlashInfer attention, decode CUDA
+graphs, no tensor parallelism). Greedy, batch 1, 11 different prompts x 256 new tokens, wall time per request:
+
+| Setup | Throughput | Draft accept rate |
+|---|---|---|
+| Plain decode | 36.3 tok/s | n/a |
+| MTP, 3 draft tokens (default) | **77.8 tok/s (2.1x)** | 66 % |
+| MTP, 4 draft tokens | **80.1 tok/s (2.2x)** | 58 % |
+
+An MTP round takes about 37 ms: 8.2 ms to draft, 28.1 ms to verify, 0.6 ms of state replay. Marlin plus the lm_head
+GEMM read the weights in about 22 ms, so a plain step cannot go much below that (about 44 tok/s). With 2 / 4 concurrent
+requests (200 tokens each) the aggregate is 70 / 129 tok/s with MTP and 35 / 74 tok/s without; those cohorts sit at
+different positions, so they run eagerly (the decode graph needs equal positions) with no loss against `=0`.
+
+The path from the first working build (eager, ~22 tok/s plain) to the numbers above, each step measured on one prompt
+set, plain decode:
+
+| Step | Plain tok/s |
+|---|---|
+| Decode CUDA graphs (FlashInfer build; page tables kept at fixed addresses between replays) | 25.6 |
+| DeltaNet recurrent kernel: state in registers, split over the value dimension (122 -> 10 us per layer) | 28.6 |
+| Fused DeltaNet decode core (conv + split + gates + recurrent in two launches), persistent Marlin workspace | 33.2 |
+| Fused residual-add + RMSNorm, SiLU-mul, vectorized RMSNorm | 33.9 |
+| Fused a/b projection, strided QK norm + RoPE, gate multiply and KV write in the 16 attention layers | 36.4 |
+
+The verify window got the matching fusions (conv + gates + recurrent with per-position checkpoints in two launches, the
+fused attention ops): 29.8 -> 28.1 ms per round.
+
+Notes:
+
+- Comparisons on a handful of prompts are noisy: a 1-ulp change flips a greedy token, the text diverges, and the accept
+  rate follows the text (moves of +-7 points on three prompts). Compare on 10+ prompts.
+- `SMILE_GATED_DELTA_UNFUSED=1` goes back to the multi-kernel DeltaNet path, `SMILE_GATED_DELTA_REFERENCE=1` to the
+  original recurrent kernel and `SMILE_FUSED_OPS=0` disables all fused elementwise kernels (A/B and debugging only).
+- With MTP the draft depth matters little: 2 / 3 / 4 / 5 drafts gave 65 / 72 / 74 / 73 tok/s on a 3-prompt set.
+
+---
+
+## 3. Building and Running
+
+All commands use the Gradle wrapper from the project root.
+
+### 3.1 Dev Mode
+
+Live-reload development mode — changes to Java sources are reflected without
+restarting. The Quarkus Dev UI is available at <http://localhost:8888/q/dev/>.
+
+```shell
+./gradlew :serve:quarkusDev \
+  --jvm-args="--add-opens java.base/java.lang=ALL-UNNAMED"
+```
+
+> The `--add-opens` flags are required by ONNX Runtime's Foreign Function Interface.
+> The dev-mode HTTP port defaults to **8888** (configured via `%dev.quarkus.http.port`).
+
+### 3.2 Packaging as a JAR
+
+```shell
+./gradlew :serve:build
+```
+
+This produces a Quarkus layered application in `build/quarkus-app/`.
+The entry point is `build/quarkus-app/quarkus-run.jar`; the dependencies
+live in `build/quarkus-app/lib/` and must be distributed together.
+
+Run it with:
+
+```shell
+java \
+  --add-opens java.base/java.lang=ALL-UNNAMED \
+  --add-opens java.base/java.nio=ALL-UNNAMED \
+  --enable-native-access ALL-UNNAMED \
+  -jar build/quarkus-app/quarkus-run.jar
+```
+
+To run on a custom port:
+
+```shell
+java \
+  --add-opens java.base/java.lang=ALL-UNNAMED \
+  --add-opens java.base/java.nio=ALL-UNNAMED \
+  --enable-native-access ALL-UNNAMED \
+  -Dquarkus.http.port=3801 \
+  -jar build/quarkus-app/quarkus-run.jar
+```
+
+### 3.3 Uber-JAR
+
+A single self-contained JAR (slower to start, simpler to deploy):
+
+```shell
+./gradlew :serve:build -Dquarkus.package.jar.type=uber-jar
+java \
+  --add-opens java.base/java.lang=ALL-UNNAMED \
+  --add-opens java.base/java.nio=ALL-UNNAMED \
+  --enable-native-access ALL-UNNAMED \
+  -jar build/smile-serve-runner.jar
+```
+
+### 3.4 Native Executable
+
+Compile to a native binary with GraalVM (sub-millisecond startup, lower memory):
+
+```shell
+./gradlew :serve:build -Dquarkus.native.enabled=true
+./build/smile-serve-*-runner
+```
+
+Without a local GraalVM installation, use a Docker-based build:
+
+```shell
+./gradlew :serve:build \
+  -Dquarkus.native.enabled=true \
+  -Dquarkus.native.container-build=true
+```
+
+See the [Quarkus native build guide](https://quarkus.io/guides/gradle-tooling) for details.
+
+### Native image variants
+
+Both Dockerfiles build in-container (context = repository root) and need no host-side build:
+
+| Dockerfile | Contents | Size |
+|---|---|---|
+| `Dockerfile.native` | Full CPU image: SMILE, ONNX, CPU chat (ONNX Runtime GenAI packages), auth and the embedded H2 database. No LibTorch | ~375 MB |
+| `Dockerfile.micro` | Inference only: SMILE and ONNX models plus the web UI's inference pages. No chat, auth/users, database, LibTorch or GenAI | ~205 MB |
+
+Both Dockerfiles build in-container with the `local` Quarkus profile by default (embedded H2 database, no
+PostgreSQL); override it with `--build-arg QUARKUS_PROFILE=prod` for `Dockerfile.native` (`native-micro` is always
+the inference-only `micro` profile, which has no database). The GPU image (`Dockerfile.gpu`) likewise builds the
+Quarkus app inside Docker and takes the same `QUARKUS_PROFILE` build argument. The profiles in
+`application.properties` are:
+
+| Profile | Use | Database |
+|---|---|---|
+| `local` | standalone deployments, the Docker images' default | embedded H2 file in the model directory |
+| `prod` | the default for a plain Gradle build | PostgreSQL |
+| `micro` | inference-only native image | none (no chat or auth) |
+| `dev` / `test` | `quarkusDev` / unit tests | H2 (file / in-memory) |
+
+`native-micro` builds with `-Dquarkus.profile=micro` (see the `%micro.*` block in `application.properties`).
+Chat and auth endpoints return 404, and `POST /api/v1/models/load` with a chat model returns 503. The chat
+page of the web UI therefore shows errors; the SMILE and ONNX inference pages work.
+
+`native-micro` can be built smaller still with `--build-arg GRADLE_ARGS="-Dquarkus.native.additional-build-args-append=-Os"`
+(about 19 MB less, same startup time, but SHAP explanations run ~1.75x and LDA ~1.25x slower; plain tree prediction is unchanged).
+
+None of the images ship ARPACK (or FlexiBLAS/EPEL, which it needed): ARPACK is only used by fit-time code
+(`smile.manifold` and `SpectralClustering`), never by the model families `serve` loads, so inference never touches it.
+Native BLAS/LAPACK comes from OpenBLAS (`openblas-openmp`).
+
+On CPU the chat engine only serves pre-converted ONNX Runtime GenAI packages (for example
+`microsoft/Phi-4-mini-instruct-onnx`); LibTorch chat requires CUDA.
+
+GraalVM needs FFM, serialization and reflection metadata that the build cannot infer. It is generated into
+`serve/src/main/resources/META-INF/native-image/smile/serve/reachability-metadata.json` by
+`python3 serve/src/main/scripts/gen-ffm-metadata.py` (after `./gradlew :core:classes`); re-run it when the
+jextract bindings or serializable model classes change. Add `--check` to verify, without writing, that the committed file is up to date (non-zero exit if it is stale).
+
+### Plugins
+
+Optional plugins (such as commercial/enterprise storage backends and Prometheus telemetry) can be placed in `serve/plugins/*.jar` before running `./gradlew :serve:build`. Plugins implement the in-tree SPI interfaces (`smile.chat.blob.BlobStoreProvider`, `smile.serve.ModelMetricsBinder`, and `smile.chat.LlmMetrics`) as `@ApplicationScoped` CDI beans and ship an empty `META-INF/beans.xml` so ArC indexes them at build time. The active blob backend is selected at runtime by `smile.blob.storage` (default: `local`), while metrics binders and sinks are discovered automatically via CDI (`@All`). Pass `-Pserve.plugins=false` to build without any staged plugin JARs.
+
+---
+
+## 4. Configuration Reference
+
+Configuration is managed in `src/main/resources/application.properties`.
+Quarkus profile prefixes (`%dev.`, `%test.`) override the base values in
+the corresponding profiles.
+
+| Property | Default | Description |
+|---|---|---|
+| `quarkus.http.port` | `8080` | HTTP listen port (`%dev` default: `8888`) |
+| `quarkus.rest.path` | `/api/v1` | Global REST path prefix |
+| `smile.serve.model` | `../model` | Path to a `.sml` file or directory of `.sml` files |
+| `smile.onnx.model` | `../model` | Path to a `.onnx` file or directory of `.onnx` files |
+| `smile.chat.model` | `../model/Llama3.1-8B-Instruct` | Local HF-layout checkpoint directory, or Hugging Face repo id (`owner/name`). Tokenizer is resolved next to the checkpoint (`original/tokenizer.model`, `tokenizer.model`, or HF `tokenizer.json` for AWQ/GPTQ cards) |
+| `smile.chat.max-seq-len` | `0` (auto) | Max context (prompt+output), like vLLM `--max-model-len` / SGLang `--context-length`. `<=0` uses `max_position_embeddings` from the model config; set explicitly (e.g. `8192`) to cap large-window models such as Qwen3.5 |
+| `smile.chat.max-batch-size` | `1` | Max in-flight chat generations (`InferenceEngine` Fluid Injection cap). Values `>1` enable continuous batching. A waiting request is admitted only when free KV can reserve its full `prompt + max_tokens` window (capped by `max-seq-len`); otherwise it stays queued. |
+| `smile.chat.max-decode-batch` | `0` (same as max-batch-size) | Cap on requests per GPU `decodeStep`; `0` means use `max-batch-size` |
+| `smile.chat.prefill-token-budget` | `2048` | Max prompt tokens prefilled per scheduler tick (chunked prefill so long prompts do not stall decode) |
+| `smile.chat.admission-timeout-ms` | `120000` | Max ms a job may wait for KV admission before failing (`0` = wait indefinitely) |
+| `smile.chat.admit-coalesce-ms` | `0` | When idle, delay first admission up to this many ms so a parallel burst can fill the queue; stops early once `queued >= max-batch-size`. `0` disables (default). Use e.g. `50` for `curl --parallel` load tests |
+| `smile.chat.admission-timeout-ms` | `120000` | Fail a waiting job if KV cannot admit it within this many ms (`0` = wait until Instant Eviction frees capacity) |
+| `smile.chat.mem-fraction-static` | `0.85` | SGLang `--mem-fraction-static`: fraction `y` of **total** GPU memory for the static region (weights + DeltaNet + KV). Leaves ~(1−y)×total free for activations (plus a small soft margin). Idle use near `y×total` is expected. Short-prompt OOM usually means activation peak/leak during forward — try `0.75` and/or a lower `max-seq-len` on 40GB TP=2 Qwen desktops. Pool is static (no per-request growth); when free KV is exhausted, generation stops early with partial output (`finish_reason=length`) |
+| `smile.chat.model-loader-threads` | `0` (auto) | Concurrent model download and shard loading threads. Peak host RAM ≈ `threads × shard size`. `0` = `min(8, CPUs)`, capped by number of files. Use `1`–`2` on RAM-tight desktops |
+| `smile.chat.devices` | `0` | CUDA device index, or comma-separated TP list (`0,7`). `%dev` default: `7`. **MiniMax-M3:** the list is the expert-parallel device set (routed experts are sharded across it) |
+| `smile.chat.tensor-parallel-size` | `1` | TP world size; with a single `devices` entry expands to consecutive GPUs |
+| `smile.chat.pipeline-parallel-size` | `1` | Must stay `1` until multi-node PP |
+| `smile.chat.kv-cache.dtype` | `auto` | KV-cache element dtype (`auto`, `bfloat16`, `float16`, `float32`, `fp8_e4m3`, `fp8_e5m2`, …). When `auto` or unset, uses `torch_dtype` from the model `config.json`. Set `fp8_e4m3` for ~2× KV capacity (longer context); attention dequants to BF16/FP16. Independent of weight quant. |
+| `smile.chat.quantization` | `auto` | Weight GEMM: `auto` / `dense` / `fp8` / `marlin_fp8` / `nvfp4` / `marlin`. **MiniMax-M3 (MXFP8):** `auto` = native block-FP8 GEMM on Hopper+ (after a self-check) else Marlin; `marlin`, `fp8` (Hopper+) force a path, `dense` dequantizes to bf16 while loading; `nvfp4` is rejected. `auto` selects FP8/NVFP4 on Hopper/Blackwell for native checkpoints, Marlin on Ampere/Ada for GPTQ/AWQ. GPTQ/AWQ on Hopper+ fails fast (no silent Marlin). **Qwen hybrid:** native FP8 (e.g. Qwen3.8-FP8) on H100+ (`sm_90+`) uses block-128 `weight_scale_inv` via LibTorch `_scaled_mm_v2` (`Fp8BlockLinear`); rebuild `libsmile_torch` after pulling. Vision tower and `lm_head` stay BF16. **On Ampere/Ada (A100) block-FP8 Qwen checkpoints run through `marlin_fp8`** (selected by `auto`): the FP8 weights stay resident and a weight-only Marlin kernel multiplies them with bf16 activations; Qwen3.8-27B-FP8 (~29 GB of weights) loads on one 40 GB A100 with `smile.chat.mem-fraction-static=0.93` and `smile.chat.speculative=false` (about 22 tok/s; MTP speculation with `smile.chat.speculative-max-concurrency=1`, `max-batch-size=2` and `mem-fraction-static=0.95` reaches ~49 tok/s). Per-tensor-scale FP8 on Ampere is not supported. GPTQ/AWQ/Marlin INT4 for Qwen remain unsupported. Marlin AWQ/GPTQ install batch-reads each safetensors shard once and packs linears in parallel (direct int4→Marlin, no FP16 round-trip); expect on the order of tens of seconds for 8B AWQ on A100 rather than multi-minute phase-1 loads. GPTQ act-order (`g_idx`) is rejected. |
+| `smile.chat.kv-cache.page-size` | `16` | Tokens per radix / KV pool page (prefix match and insert are page-aligned) |
+| `smile.chat.kv-cache.prefix-reuse` | `true` | Match/insert prompts in the radix KV tree (SGLang-style). Hybrid Qwen also needs `hybrid-prefix-replay` |
+| `smile.chat.kv-cache.hybrid-prefix-replay` | `true` | On a hybrid Qwen prefix hit, replay the matched prefix to restore DeltaNet state while sharing KV pages. Set `false` to force-disable hybrid prefix reuse |
+| `smile.chat.oga.enabled` | `true` | When Torch path is not selected, try ORT GenAI for GenAI-ready models (incl. nested HF packages / Olive cache) |
+| `smile.chat.oga.precision` | _(auto)_ | Cache-key / offline Olive `optimize --precision`; empty/`auto` uses cascade default (`int4` — `optimize` does not accept `fp8`) |
+| `smile.chat.oga.cache-dir` | `{SMILE_CACHE}/olive` | Olive output cache root (never writes into `HF_HOME` hub trees); serve opens hits at startup |
+| `smile.chat.oga.olive-command` | `olive` | Olive CLI executable for **offline** conversion only (not run at startup) |
+| `smile.chat.oga.device` / `provider` | _(cascade)_ | Optional Olive overrides for offline convert / cache key; default from `GenAI.resolveOliveTarget()` |
+| `quarkus.datasource.db-kind` | `postgresql` | Database backend for chat history |
+| `quarkus.datasource.jdbc.url` | `jdbc:postgresql://localhost:5432/smile` | JDBC connection URL |
+| `quarkus.hibernate-orm.active` | `false` | Enable ORM (set `true` when database is available) |
+
+**Override at runtime** with `-D` system properties, for example:
+
+```shell
+java ... -Dsmile.serve.model=/data/models/rf_classifier.sml -jar quarkus-run.jar
+```
+
+---
+
+## 5. Classic ML Inference API
+
+### 5.1 Model Format
+
+Classic ML models are serialized Java objects saved in `.sml` files by the
+SMILE `smile.model.Model` framework. They carry:
+
+- The trained algorithm (random forest, SVM, gradient boost, etc.)
+- The input feature schema (field names and data types)
+- Training / validation metrics
+- Optional metadata tags (`id`, `version`, user-defined properties)
+
+At startup, `InferenceService` scans the path specified by the property
+`smile.serve.model`. If the path is a regular `.sml` file only that model
+is loaded; if it is a directory every `.sml` file in the directory is loaded.
+
+### 5.2 Get Model Metadata
+
+Returns the algorithm name, input schema, and tags for a model.
+Use `GET /api/v1/models` to discover loaded model IDs.
+
+```
+GET /api/v1/smile/{id}
+```
+
+**Example:**
+
+```shell
+curl http://localhost:8080/api/v1/smile/iris_random_forest-1
+```
+
+```json
+{
+  "id": "iris_random_forest-1",
+  "algorithm": "random-forest",
+  "schema": {
+    "petallength": { "type": "float", "nullable": false },
+    "petalwidth":  { "type": "float", "nullable": false },
+    "sepallength": { "type": "float", "nullable": false },
+    "sepalwidth":  { "type": "float", "nullable": false }
+  },
+  "tags": {
+    "smile.random_forest.trees": "200"
+  }
+}
+```
+
+The `schema` object lists every input feature in alphabetical order — this
+is the **column order** used by the CSV streaming endpoint.
+
+### 5.3 Single Inference (JSON)
+
+Send one sample as a JSON object and receive the prediction synchronously.
+
+```
+POST /api/v1/smile/{id}
+Content-Type: application/json
+```
+
+The request body is a flat JSON object whose keys are the feature names
+defined in the model schema. **All non-nullable fields are required.**
+
+**Classification example (iris):**
+
+```shell
+curl -X POST http://localhost:8080/api/v1/smile/iris_random_forest-1 \
+  -H "Content-Type: application/json" \
+  -d '{
+    "sepallength": 5.1,
+    "sepalwidth":  3.5,
+    "petallength": 1.4,
+    "petalwidth":  0.2
+  }'
+```
+
+```json
+{
+  "prediction": 0,
+  "probabilities": [0.960, 0.021, 0.019]
+}
+```
+
+- `prediction` — the predicted class label (integer) or regression value (float).
+- `probabilities` — posterior class probabilities for **soft classifiers**
+  (e.g. random forest, logistic regression). Absent for hard classifiers and
+  regressors.
+- `explanations` — optional model explanation object (present when requested).
+
+#### Explanations (TreeSHAP & KernelSHAP)
+
+Explanations can be requested by passing `"enableExplanations": true` in the JSON body, or appending `?explain=true` to the URL.
+
+```shell
+curl -X POST "http://localhost:8080/api/v1/smile/iris_random_forest-1?explain=true" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "sepallength": 5.1,
+    "sepalwidth":  3.5,
+    "petallength": 1.4,
+    "petalwidth":  0.2
+  }'
+```
+
+```json
+{
+  "prediction": 0,
+  "probabilities": [0.960, 0.021, 0.019],
+  "explanations": {
+    "shap": [
+      [0.012, -0.045, 0.123, -0.002],
+      [-0.034, 0.056, -0.210, 0.015],
+      [0.022, -0.011, 0.087, -0.013]
+    ]
+  }
+}
+```
+
+- For **classification models** (tree ensembles via TreeSHAP, and logistic regression, LDA/QDA/RDA/FLD, MLP, SVM, RBF networks via KernelSHAP), `shap` is a 2D array of floats with dimension `[classes][features]`, formatted to 3 decimal places.
+- For **regression models** (tree ensembles via TreeSHAP, linear models via exact linear SHAP, and Gaussian Process, MLP, SVM, RBF networks via KernelSHAP), `shap` is a 1D array of floats with dimension `[features]`.
+- For custom models that do not support SHAP, `shap` returns `"Not supported"`.
+
+For models using **KernelSHAP**, optional per-request parameters can be passed as query parameters (`?samples=N&ridge=R`) or in the JSON request body (`shapSamples`, `shapRidge`, or `"shap": {"samples": N, "ridge": R}`):
+
+| Query param | JSON field | Type | Default | Description |
+|---|---|---|---|---|
+| `samples` | `shapSamples` / `shap.samples` | `int` | `0` (auto: `2 * M + 2048`) | Maximum number of feature coalitions to evaluate per instance (`>= 0`). |
+| `ridge` | `shapRidge` / `shap.ridge` | `double` | `1e-8` | L2 regularization penalty for weighted least squares (`>= 0`, finite). |
+
+```shell
+curl -X POST "http://localhost:8080/api/v1/smile/iris_lda-1?explain=true&samples=256&ridge=1e-6" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "sepallength": 5.1,
+    "sepalwidth":  3.5,
+    "petallength": 1.4,
+    "petalwidth":  0.2
+  }'
+```
+
+**Error responses:**
+
+| HTTP | Cause |
+|---|---|
+| `400 Bad Request` | Missing required field, malformed JSON, or invalid SHAP parameters (`samples < 0` or `ridge < 0` / non-finite) |
+| `404 Not Found` | Unknown model ID |
+
+### 5.4 Streaming Inference (CSV / JSON-lines)
+
+Process many samples in a single request. The server returns results as a
+[Server-Sent Events](https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events)
+stream emitting structured JSON objects — one `data:` line per input sample.
+Append `?explain=true` to include explanations in each streaming event.
+
+```
+POST /api/v1/smile/{id}/stream
+Content-Type: text/plain          ← CSV mode
+Content-Type: application/json   ← JSON-lines mode
+```
+
+#### CSV mode (`text/plain`)
+
+Each non-blank line is a comma-separated row of feature values in the **same
+column order as the model schema** (alphabetical by field name, as shown by
+`GET /api/v1/smile/{id}`).
+
+```shell
+cat iris.csv | curl -X POST \
+  -H "Content-Type: text/plain" \
+  --data-binary @- \
+  http://localhost:8080/api/v1/smile/iris_random_forest-1/stream
+```
+
+Where `iris.csv` might contain:
+
+```
+5.1,3.5,1.4,0.2
+6.7,3.0,5.2,2.3
+5.8,2.7,4.1,1.0
+```
+
+The response stream (SSE format emitting JSON payloads):
+
+```
+data: {"prediction":0,"probabilities":[0.960,0.021,0.019]}
+
+data: {"prediction":2,"probabilities":[0.012,0.051,0.937]}
+
+data: {"prediction":1,"probabilities":[0.031,0.752,0.217]}
+```
+
+#### JSON-lines mode (`application/json`)
+
+Each non-blank line must be a complete JSON object (one per line).
+This is more verbose but supports named fields in any order. Each sample can also independently include `"enableExplanations": true`.
+
+```shell
+cat iris.jsonl | curl -X POST \
+  -H "Content-Type: application/json" \
+  --data-binary @- \
+  http://localhost:8080/api/v1/smile/iris_random_forest-1/stream
+```
+
+Where `iris.jsonl` contains:
+
+```json
+{"sepallength":5.1,"sepalwidth":3.5,"petallength":1.4,"petalwidth":0.2}
+{"sepallength":6.7,"sepalwidth":3.0,"petallength":5.2,"petalwidth":2.3,"enableExplanations":true}
+```
+
+### 5.5 Model IDs
+
+A model's ID is constructed as `<name>-<version>` from the model's embedded
+metadata tags (`smile.model.Model.ID` and `smile.model.Model.VERSION`).
+If those tags are absent, the file name stem is used as the name and `"1"` as
+the version. For example, a file named `iris_random_forest.sml` with no ID
+tag gets the ID `iris_random_forest-1`.
+
+### 5.6 Model Health and Metrics
+
+Inspect the operational health, in-flight request concurrency, throughput, and
+inference latency of a loaded SMILE model.
+
+#### Health status
+
+```
+GET /api/v1/smile/{id}/health
+```
+
+```shell
+curl http://localhost:8080/api/v1/smile/iris_random_forest-1/health
+```
+
+```json
+{
+  "id": "iris_random_forest-1",
+  "status": "ACTIVE",
+  "in_flight_requests": 0,
+  "uptime_seconds": 182
+}
+```
+
+- `status`: `ACTIVE`, `UNLOADING`, or `UNLOADED`. When `UNLOADING` or `UNLOADED`, incoming requests receive `503 Service Unavailable`.
+- `in_flight_requests`: Number of active inference calls currently executing against this model.
+- `uptime_seconds`: Time elapsed since the model was loaded.
+
+#### Metrics and latency
+
+Per-model metrics are exposed through the unified Prometheus endpoint
+`GET /q/metrics` (see [§1.4](#14-health-and-metrics-endpoints)), not a
+per-model JSON endpoint. Every series carries a `model_id` label.
+
+```shell
+curl http://localhost:8080/q/metrics | grep 'serve_smile_.*iris_random_forest-1'
+```
+
+| Metric | Type | Description |
+|---|---|---|
+| `serve_smile_requests_total` | counter | Total inference requests |
+| `serve_smile_failed_requests_total` | counter | Failed inference requests |
+| `serve_smile_successful_requests` | gauge | Successful inference requests |
+| `serve_smile_in_flight_requests` | gauge | In-flight inference requests |
+| `serve_smile_uptime_seconds` | gauge | Seconds since the model was loaded |
+| `serve_smile_throughput_requests_per_second` | gauge | Average requests per second since load |
+| `serve_smile_mean_latency_seconds` | gauge | Mean inference latency |
+| `serve_smile_min_latency_seconds` | gauge | Minimum inference latency |
+| `serve_smile_max_latency_seconds` | gauge | Maximum inference latency |
+
+ONNX models expose the same set under the `serve_onnx_*` namespace.
+
+### 5.7 Model Lifecycle Control (Reload & Unload)
+
+Administrative endpoints for reloading or unloading models are restricted to
+`localhost` (`127.0.0.1` / `::1`) via `@LocalhostOnly` to prevent unauthorized
+remote manipulation. Non-localhost requests are rejected with **HTTP 403 Forbidden**.
+
+#### Reload model from disk
+
+Reloads the model from its backing `.sml` file on disk. If the file was updated,
+the new model atomically replaces the active instance. If the model was previously
+unloaded, it is restored into active memory:
+
+```
+POST /api/v1/smile/{id}/reload
+```
+
+```shell
+curl -X POST http://localhost:8080/api/v1/smile/iris_random_forest-1/reload
+```
+
+```json
+{
+  "status": "reloaded",
+  "id": "iris_random_forest-1",
+  "path": "/model/iris_random_forest.sml",
+  "algorithm": "random-forest",
+  "timestamp": 1728087382
+}
+```
+
+#### Unload model from memory
+
+Removes a model from active memory to free RAM. The service transitions the
+model state to `UNLOADING`, stops accepting new requests (returning `503`), and
+gracefully waits for in-flight requests to finish:
+
+```
+POST /api/v1/smile/{id}/unload?timeout=10
+```
+
+- `timeout` *(optional, default `10`)*: Maximum seconds to wait for active in-flight requests to complete.
+
+```shell
+curl -X POST "http://localhost:8080/api/v1/smile/iris_random_forest-1/unload?timeout=5"
+```
+
+```json
+{
+  "status": "unloaded",
+  "id": "iris_random_forest-1",
+  "drained": true,
+  "timestamp": 1728087400
+}
+```
+
+After unloading, subsequent inference requests to this model ID return **HTTP 404 Not Found**.
+The model can be brought back into memory at any time by calling `/reload` or `/models/load`.
+
+---
+
+## 6. ONNX Inference API
+
+The ONNX endpoint exposes any model in the
+[ONNX open format](https://onnx.ai/) through SMILE's native ONNX Runtime
+binding (`smile.onnx`). This covers models exported from PyTorch, TensorFlow,
+scikit-learn (via `sklearn-onnx`), and many other frameworks.
+
+### 6.1 Model Format
+
+At startup, `OnnxService` scans the folder specified by the property
+`smile.onnx.model`. Every `.onnx` file found is loaded into an
+`InferenceSession`. The model ID is the file name without
+the `.onnx` extension (e.g., `resnet50.onnx` → ID `resnet50`).
+
+**Native library:** the ONNX Runtime shared library
+(`libonnxruntime.so` / `libonnxruntime.dylib` / `onnxruntime.dll`) must be
+on the OS library search path, and the JVM must
+include `--enable-native-access=ALL-UNNAMED`. If the library is missing,
+startup continues without ONNX models (endpoints return 404) rather than
+aborting the whole serve process. Download pre-built binaries from the
+[ORT releases](https://github.com/microsoft/onnxruntime/releases) page.
+
+### 6.2 Get ONNX Model Info
+
+Returns graph metadata and the typed, shaped input/output node descriptors.
+Use `GET /api/v1/models` to discover loaded model IDs.
+
+```
+GET /api/v1/onnx/{id}
+```
+
+```shell
+curl http://localhost:8080/api/v1/onnx/resnet50
+```
+
+```json
+{
+  "id": "resnet50",
+  "graphName": "ResNet50",
+  "description": "Image classification model",
+  "version": 1,
+  "inputs": [
+    {
+      "name": "input",
+      "onnxType": "TENSOR",
+      "elementType": "FLOAT",
+      "shape": [1, 3, 224, 224]
+    }
+  ],
+  "outputs": [
+    {
+      "name": "output",
+      "onnxType": "TENSOR",
+      "elementType": "FLOAT",
+      "shape": [1, 1000]
+    }
+  ],
+  "customMeta": {}
+}
+```
+
+A shape value of `-1` means that dimension is **dynamic** (determined at
+inference time from the input data).
+
+### 6.3 Single Inference (JSON)
+
+```
+POST /api/v1/onnx/{id}
+Content-Type: application/json
+```
+
+The request body is a JSON object mapping each **input name** to a **flat
+JSON array** of numbers or strings. The server constructs the required ORT tensor from the
+declared element type and shape.
+
+**Example — image classification (resnet50, 1×3×224×224 = 150528 floats):**
+
+```shell
+curl -X POST http://localhost:8080/api/v1/onnx/resnet50 \
+  -H "Content-Type: application/json" \
+  -d '{"input": [0.485, 0.456, 0.406, ...]}'
+```
+
+The Infer UI image path resizes to the model’s H×W, scales to `[0, 1]`, then
+applies ImageNet channel normalization `(x - mean) / std` with
+`mean=[0.485, 0.456, 0.406]`, `std=[0.229, 0.224, 0.225]` (NCHW or NHWC as
+declared). When posting tensors yourself, use the same layout and
+normalization the model was trained with.
+
+Response — a JSON object mapping each **output name** to a flat array of
+**raw logits** (not probabilities) or strings. ImageNet classifiers from the ONNX Model
+Zoo typically omit a Softmax node; apply `MathEx.softmax` before interpreting
+scores as class probabilities (same as `InferenceSessionTest` in `core`).
+
+```json
+{
+  "output": [0.001, 0.002, 0.872, 0.003, ...]
+}
+```
+
+**Multi-input model example:**
+
+```shell
+curl -X POST http://localhost:8080/api/v1/onnx/bert_classifier \
+  -H "Content-Type: application/json" \
+  -d '{
+    "input_ids":      [101, 2054, 2003, 1996, 3007, 1997, 2605, 1029, 102],
+    "attention_mask": [1,   1,    1,    1,    1,    1,    1,    1,    1  ],
+    "token_type_ids": [0,   0,    0,    0,    0,    0,    0,    0,    0  ]
+  }'
+```
+
+**String input model example (e.g. scikit-learn pipeline with categorical string features or text inputs):**
+
+```shell
+curl -X POST http://localhost:8080/api/v1/onnx/pipeline_classifier \
+  -H "Content-Type: application/json" \
+  -d '{
+    "category": ["electronics", "apparel"],
+    "rating":   [4.5, 3.0]
+  }'
+```
+
+**Supported input element types:**
+
+| ONNX type | JSON values | ORT type |
+|---|---|---|
+| `FLOAT` | numbers | `float[]` |
+| `DOUBLE` | numbers | `double[]` |
+| `INT32` | integers | `int[]` |
+| `INT64` | integers | `long[]` |
+| `INT8` / `UINT8` / `BOOL` | integers (0/1 for bool) | `byte[]` |
+| `STRING` | strings | `String[]` |
+
+**Error responses:**
+
+| HTTP | Cause |
+|---|---|
+| `400 Bad Request` | Missing input, wrong element count, type mismatch |
+| `404 Not Found` | Unknown model ID |
+
+### 6.4 Streaming Inference
+
+Identical in structure to the classic ML streaming endpoint but returns
+JSON objects:
+
+```
+POST /api/v1/onnx/{id}/stream
+Content-Type: text/plain          ← CSV floats for single-input models
+Content-Type: application/json   ← JSON-lines for multi-input models
+```
+
+**CSV (single-input models only):**
+
+```shell
+cat features.csv | curl -X POST \
+  -H "Content-Type: text/plain" \
+  --data-binary @- \
+  http://localhost:8080/api/v1/onnx/my_classifier/stream
+```
+
+Each response line is a compact JSON object:
+
+```
+data: {"output":[0.02,0.95,0.03]}
+
+data: {"output":[0.88,0.07,0.05]}
+```
+
+**JSON-lines (any number of inputs):**
+
+```shell
+cat samples.jsonl | curl -X POST \
+  -H "Content-Type: application/json" \
+  --data-binary @- \
+  http://localhost:8080/api/v1/onnx/bert_classifier/stream
+```
+
+### 6.5 Tensor Types and Shape Resolution
+
+The server automatically resolves the ORT tensor shape from the model's
+declared input shape and the actual array length:
+
+- **Fully static shape** (no `-1` dimensions) — the array length must exactly
+  match the product of all dimensions. A mismatch returns HTTP 400.
+- **Single dynamic dimension** — the unknown dimension is inferred as
+  `arrayLength / product(staticDimensions)`. For example, a declared shape
+  `[-1, 3, 224, 224]` with 150528 elements resolves to `[1, 3, 224, 224]`.
+- **Multiple dynamic dimensions** — the shape is set to `[1, arrayLength]`.
+- **No shape info** — the shape is set to `[1, arrayLength]`.
+
+### 6.6 ONNX Model Health and Metrics
+
+Inspect the operational state, active in-flight count, and execution performance
+of an ONNX model.
+
+#### Health status
+
+```
+GET /api/v1/onnx/{id}/health
+```
+
+```shell
+curl http://localhost:8080/api/v1/onnx/resnet50/health
+```
+
+```json
+{
+  "id": "resnet50",
+  "status": "ACTIVE",
+  "in_flight_requests": 0,
+  "uptime_seconds": 95
+}
+```
+
+#### Metrics and latency
+
+Per-model metrics are exposed through the unified Prometheus endpoint
+`GET /q/metrics` (see [§1.4](#14-health-and-metrics-endpoints)), not a
+per-model JSON endpoint. Every series carries a `model_id` label.
+
+```shell
+curl http://localhost:8080/q/metrics | grep 'serve_onnx_.*resnet50'
+```
+
+| Metric | Type | Description |
+|---|---|---|
+| `serve_onnx_requests_total` | counter | Total inference requests |
+| `serve_onnx_failed_requests_total` | counter | Failed inference requests |
+| `serve_onnx_successful_requests` | gauge | Successful inference requests |
+| `serve_onnx_in_flight_requests` | gauge | In-flight inference requests |
+| `serve_onnx_uptime_seconds` | gauge | Seconds since the model was loaded |
+| `serve_onnx_throughput_requests_per_second` | gauge | Average requests per second since load |
+| `serve_onnx_mean_latency_seconds` | gauge | Mean inference latency |
+| `serve_onnx_min_latency_seconds` | gauge | Minimum inference latency |
+| `serve_onnx_max_latency_seconds` | gauge | Maximum inference latency |
+
+### 6.7 ONNX Model Lifecycle Control (Reload & Unload)
+
+Like the SMILE model control endpoints, ONNX model administrative endpoints are
+restricted to `localhost` (`127.0.0.1` / `::1`) via `@LocalhostOnly`. Remote
+calls return **HTTP 403 Forbidden**.
+
+#### Reload ONNX model from disk
+
+Re-opens and reconstructs the native ONNX Runtime `InferenceSession` from the
+backing `.onnx` file on disk, atomically updating the model and closing the old
+session:
+
+```
+POST /api/v1/onnx/{id}/reload
+```
+
+```shell
+curl -X POST http://localhost:8080/api/v1/onnx/resnet50/reload
+```
+
+```json
+{
+  "status": "reloaded",
+  "id": "resnet50",
+  "path": "/model/resnet50.onnx",
+  "timestamp": 1728087450
+}
+```
+
+#### Unload ONNX model from memory
+
+Transitions the model to `UNLOADING`, waits for any active inference runs to
+drain, closes the native session to free native memory/GPU resources, and removes
+it from active memory:
+
+```
+POST /api/v1/onnx/{id}/unload?timeout=10
+```
+
+```shell
+curl -X POST "http://localhost:8080/api/v1/onnx/resnet50/unload?timeout=5"
+```
+
+```json
+{
+  "status": "unloaded",
+  "id": "resnet50",
+  "drained": true,
+  "timestamp": 1728087460
+}
+```
+
+---
+
+## 7. LLM Chat API
+
+SMILE Serve includes a Java implementation of
+[Llama 3](https://github.com/haifengl/smile/tree/master/deep/src/main/java/smile/llm/llama)
+for on-premise LLM inference. The chat API is designed to be compatible with
+the OpenAI Chat Completions interface.
+
+The LLM is optional: if the path specified by the property `smile.chat.model`
+does not exist on the file system (and cannot be resolved via Hugging Face /
+OGA), `ChatService` starts in an *unavailable* state and every request to the
+chat endpoints returns **HTTP 503 Service Unavailable**.
+
+**Backend selection:** with CUDA and a builtin Llama/Qwen checkpoint, serve uses
+the Torch path + continuous batching. Otherwise it falls back to ONNX Runtime
+GenAI (`GenAiChatModel`) when the model is already GenAI-ready
+(`genai_config.json` at the repo root or under provider folders such as
+`cuda/cuda-int4-…/`, or a prior Olive cache under `{SMILE_CACHE}/olive`). Serve
+does **not** run Olive at startup — convert offline with `smile.chat.Olive`
+(see `smile.chat.oga.*`). Tools input / structured `tool_calls` output work on
+the serial GenAI path; multimodal GenAI materializes media to temp files. See
+[deep/ONNX_GENAI.md](../deep/ONNX_GENAI.md).
+
+There are therefore two ways to run a chat model:
+
+- **Native (LibTorch) path** — the built-in `smile.llm` implementations of
+  **Llama-3.1** and **Qwen3.5/3.8** (Gated DeltaNet hybrid), with continuous
+  batching, KV-cache prefix reuse, quantization, tensor parallelism, and MTP
+  speculative decoding. Use this when your checkpoint is one of those families
+  and you have CUDA GPUs.
+- **ONNX Runtime GenAI path** — any model already packaged for ONNX Runtime
+  GenAI (a directory containing `genai_config.json`). This is how you serve
+  **every other model family** (Phi, Mistral, Gemma, Granite, gpt-oss, …)
+  without a SMILE-native implementation, on CPU, CUDA, DirectML, or the NPU
+  execution providers.
+
+### 7.1 Supported Models
+
+The native path covers **Llama-3.1** and **Qwen3.5/3.8** checkpoints (see
+[§2](#2-llm-decode-benchmarks) for benchmarks and
+[deep/LLM.md](../deep/LLM.md) for the implementation). Every other family is
+served through ONNX Runtime GenAI and requires only a GenAI-ready package —
+either published on the Hugging Face Hub, converted offline with Olive
+(`smile.chat.Olive`; see [deep/ONNX_GENAI.md](../deep/ONNX_GENAI.md)), or built
+with the ONNX Runtime GenAI
+[model builder](https://github.com/microsoft/onnxruntime-genai/tree/main/src/python/py/models).
+
+Pass any of these Hugging Face repo ids (or a local directory) straight to
+`smile.chat.model`:
+
+```shell
+./gradlew :serve:quarkusDev "-Dsmile.chat.model=microsoft/Phi-4-mini-instruct-onnx"
+```
+
+**Language models** (decoder-only). The GenAI runtime dispatches on the
+architecture recorded in `genai_config.json`; the checkpoint below is a
+known-good, GenAI-ready package for each family.
+
+| Family | ONNX Runtime GenAI architecture | Example GenAI-ready checkpoint |
+|---|---|---|
+| Phi (3 / 3.5 / 4) | `phi3` | [microsoft/Phi-4-mini-instruct-onnx](https://huggingface.co/microsoft/Phi-4-mini-instruct-onnx), [microsoft/Phi-3.5-mini-instruct-onnx](https://huggingface.co/microsoft/Phi-3.5-mini-instruct-onnx), [microsoft/phi-4-onnx](https://huggingface.co/microsoft/phi-4-onnx) |
+| Phi reasoning | `phi3` | [microsoft/Phi-4-reasoning-onnx](https://huggingface.co/microsoft/Phi-4-reasoning-onnx), [microsoft/Phi-4-mini-reasoning-onnx](https://huggingface.co/microsoft/Phi-4-mini-reasoning-onnx) |
+| Llama (2 / 3 / 3.1 / 3.2) | `llama` | [onnx-community/Llama-3.2-3B-Instruct-GENAI-ONNX](https://huggingface.co/onnx-community/Llama-3.2-3B-Instruct-GENAI-ONNX) |
+| Mistral | `mistral` | [onnx-community/Mistral-7B-Instruct-v0.3](https://huggingface.co/onnx-community/Mistral-7B-Instruct-v0.3), [microsoft/mistral-7b-instruct-v0.2-ONNX](https://huggingface.co/microsoft/mistral-7b-instruct-v0.2-ONNX) |
+| Qwen (2.5 / 3 / 3.5 / 3.6) | `qwen2` / `qwen3` | [onnx-community/Qwen3-1.7B-ONNX](https://huggingface.co/onnx-community/Qwen3-1.7B-ONNX), [onnx-community/Qwen3.6-27B-Onnx](https://huggingface.co/onnx-community/Qwen3.6-27B-Onnx) |
+| Gemma (2 / 3) | `gemma2` / `gemma3` | [Arm/gemma-3-1b-instruct-onnx-genai-int4-emb-int8](https://huggingface.co/Arm/gemma-3-1b-instruct-onnx-genai-int4-emb-int8) |
+| Granite (3.x / 4.x) | `granite` | [onnx-community/Granite-4.1-3b-Onnx](https://huggingface.co/onnx-community/Granite-4.1-3b-Onnx), [onnx-community/Granite-4.1-8b-Onnx](https://huggingface.co/onnx-community/Granite-4.1-8b-Onnx) |
+| gpt-oss | `gpt_oss` | [onnx-community/gpt-oss-20b-ONNX](https://huggingface.co/onnx-community/gpt-oss-20b-ONNX) |
+| DeepSeek (R1 distill) | `deepseek` | [onnxruntime/DeepSeek-R1-Distill-ONNX](https://huggingface.co/onnxruntime/DeepSeek-R1-Distill-ONNX) |
+| InternLM2 | `internlm2` | [onnx-community/InternLM2-ONNX](https://huggingface.co/onnx-community/InternLM2-ONNX) |
+| ChatGLM (2 / 3) | `chatglm` | [amd/chatglm3-6b-onnx-ryzenai-npu](https://huggingface.co/amd/chatglm3-6b-onnx-ryzenai-npu) |
+| Nemotron | `nemotron` | [onnx-community/Nemotron-Cascade-8B](https://huggingface.co/onnx-community/Nemotron-Cascade-8B), [onnx-community/OpenReasoning-Nemotron-7B](https://huggingface.co/onnx-community/OpenReasoning-Nemotron-7B) |
+| ERNIE 4.5 | `ernie4_5` | [Prince-1/ERNIE-4.5-0.3B-Onnx](https://huggingface.co/Prince-1/ERNIE-4.5-0.3B-Onnx) |
+| Fara | `fara` | [onnx-community/Fara-7B-Onnx](https://huggingface.co/onnx-community/Fara-7B-Onnx) |
+| SmolLM3 | `smollm3` | (build from [HuggingFaceTB/SmolLM3-3B](https://huggingface.co/HuggingFaceTB/SmolLM3-3B) with the model builder) |
+
+**Vision-language models.** `GenAiChatModel` accepts local image/audio paths
+through `MultiModalProcessor`; serve materializes data-URL / HTTP media to temp
+files first.
+
+| Family | ONNX Runtime GenAI architecture | Example GenAI-ready checkpoint |
+|---|---|---|
+| Phi-3 Vision / Phi-4 multimodal | `phi3v` | [microsoft/Phi-3.5-vision-instruct-onnx](https://huggingface.co/microsoft/Phi-3.5-vision-instruct-onnx), [microsoft/Phi-4-multimodal-instruct-onnx](https://huggingface.co/microsoft/Phi-4-multimodal-instruct-onnx) |
+| Qwen-VL / Qwen2.5-VL / Qwen3-VL | `qwen2_vl` | (build with the model builder from the Qwen VL checkpoints) |
+
+**Audio models.** Whisper speech recognition is supported by the runtime;
+select it outside the chat API (the chat endpoint is text-only).
+
+| Family | ONNX Runtime GenAI architecture | Example GenAI-ready checkpoint |
+|---|---|---|
+| Whisper | `whisper` | [tonythethompson/Whisper-Tiny-GenAI-ONNX](https://huggingface.co/tonythethompson/Whisper-Tiny-GenAI-ONNX), [tonythethompson/whisper-large-v3-genai](https://huggingface.co/tonythethompson/whisper-large-v3-genai) |
+
+> The architecture list mirrors the upstream ONNX Runtime GenAI
+> [supported models](https://microsoft-onnxruntime-genai-88.mintlify.app/concepts/models#language-models)
+> and model-builder support matrix; the checkpoint ids are Hub repositories that
+> ship `genai_config.json`. Star counts, file layouts, and provider folders vary
+> per repo — `GenAiModelPaths` auto-detects the nested package
+> (CUDA / DirectML / CPU) that matches your execution provider.
+
+### 7.2 List models
+
+```
+GET /api/v1/models
+```
+
+OpenAI-compatible catalog of **all** loaded models — chat LLMs, ONNX graphs,
+and SMILE {@code .sml} models
+([List models](https://developers.openai.com/api/reference/resources/models/methods/list)).
+
+Inference still uses type-specific paths:
+`/api/v1/chat/completions`, `/api/v1/onnx/{id}`, `/api/v1/smile/{id}`.
+
+```shell
+curl http://localhost:8080/api/v1/models
+```
+
+```json
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "meta-llama/Llama-3.1-8B-Instruct",
+      "object": "model",
+      "created": 1741900000,
+      "owned_by": "meta-llama",
+      "shutdown_date": null,
+      "kind": "LLM"
+    },
+    {
+      "id": "iris_random_forest-1",
+      "object": "model",
+      "created": 1710000000,
+      "owned_by": "Unknown",
+      "shutdown_date": null,
+      "kind": "random-forest"
+    },
+    {
+      "id": "resnet50",
+      "object": "model",
+      "created": 1710000000,
+      "owned_by": "Unknown",
+      "shutdown_date": null,
+      "kind": "ONNX"
+    }
+  ]
+}
+```
+
+`kind` values:
+
+- **`LLM`** — chat / completion models
+- **`ONNX`** — ONNX Runtime graphs
+- **SMILE algorithm name** — e.g. `random-forest`, `cart`, `logistic` (from the `.sml` model)
+
+`owned_by` rules:
+
+- **Chat (HF):** first segment of the repo id (`meta-llama/...` → `meta-llama`)
+- **Chat (local):** first segment of `Llama.family()` (`meta/llama3` → `meta`)
+- **SMILE `.sml`:** tag `author`, else `owner`; otherwise `Unknown`
+- **ONNX:** custom metadata `author`/`owner` when present; otherwise `Unknown`
+
+### 7.3 Retrieve model
+
+```
+GET /api/v1/models/{id}
+```
+
+OpenAI-compatible
+[retrieve model](https://developers.openai.com/api/reference/resources/models/methods/retrieve).
+Returns the same base `ModelObject` fields as list entries, plus an optional
+type-specific detail block. Does **not** run inference — use
+`/chat/completions`, `/onnx/{id}`, or `/smile/{id}` for that.
+
+Ids may contain slashes (e.g. Hugging Face repo ids).
+
+| `kind` | Extra field | Contents |
+|---|---|---|
+| SMILE algorithm | `smile` | `formula`, `schema`, `tags`, `train` / `validation` / `test` metrics (finite values only) |
+| `ONNX` | `onnx` | producer, domain, graph info, I/O shapes, custom metadata from the `.onnx` file |
+| `LLM` | `llm` | family, source (`local`/`huggingface`), architecture from `config.json` / `params.json` |
+
+List responses omit `smile` / `onnx` / `llm` so the catalog stays lean.
+
+```shell
+curl http://localhost:8080/api/v1/models/iris_random_forest-1
+```
+
+```json
+{
+  "id": "iris_random_forest-1",
+  "object": "model",
+  "created": 1710000000,
+  "owned_by": "Unknown",
+  "shutdown_date": null,
+  "kind": "random-forest",
+  "smile": {
+    "formula": "class ~ .",
+    "schema": {
+      "petallength": { "type": "float", "nullable": false }
+    },
+    "tags": {},
+    "train": {
+      "accuracy": 0.97,
+      "size": 150
+    },
+    "validation": null,
+    "test": null
+  }
+}
+```
+
+### 7.4 Dynamic Model Loading
+
+Load a new model from disk or Hugging Face Hub dynamically into active memory
+without restarting the server process:
+
+```
+POST /api/v1/models/load
+Content-Type: application/json
+```
+
+This endpoint is restricted to `localhost` (`127.0.0.1` / `::1`) via `@LocalhostOnly`.
+Remote requests return **HTTP 403 Forbidden**.
+
+#### Request body fields
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `model` | `string` | **Yes** | Local file or directory path, or Hugging Face repo ID (`owner/name`) |
+| `kind` | `string` | No (default `auto`) | Model kind: `sml` / `smile`, `onnx`, `llm` / `chat`, or `auto` |
+| `config` | `object` | No | Serving configuration overrides (chat and ONNX GenAI models only) |
+
+#### Conflict handling (409 Conflict)
+
+To maintain a clean API contract without overlapping responsibilities, `POST /api/v1/models/load`
+strictly rejects any model whose ID is already loaded in active memory with **HTTP 409 Conflict**:
+
+```json
+{
+  "error": "Model 'iris_random_forest-1' is already loaded. Use POST /api/v1/smile/iris_random_forest-1/reload to refresh it, or unload it first."
+}
+```
+
+#### Examples
+
+**1. Load a SMILE `.sml` model:**
+
+```shell
+curl -X POST http://localhost:8080/api/v1/models/load \
+  -H "Content-Type: application/json" \
+  -d '{"model": "/model/iris_random_forest.sml", "kind": "smile"}'
+```
+
+```json
+{
+  "status": "loaded",
+  "kind": "sml",
+  "model": "/model/iris_random_forest.sml",
+  "ids": ["iris_random_forest-1"],
+  "id": "iris_random_forest-1",
+  "algorithm": "random-forest"
+}
+```
+
+**2. Load an ONNX model:**
+
+```shell
+curl -X POST http://localhost:8080/api/v1/models/load \
+  -H "Content-Type: application/json" \
+  -d '{"model": "/model/resnet50.onnx", "kind": "onnx"}'
+```
+
+```json
+{
+  "status": "loaded",
+  "kind": "onnx",
+  "model": "/model/resnet50.onnx",
+  "ids": ["resnet50"],
+  "id": "resnet50"
+}
+```
+
+**3. Load a Chat / LLM model with configuration overrides:**
+
+```shell
+curl -X POST http://localhost:8080/api/v1/models/load \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "microsoft/Phi-4-mini-instruct-onnx",
+    "kind": "chat",
+    "config": {
+      "devices": "0",
+      "max_batch_size": 8,
+      "max_seq_len": 4096
+    }
+  }'
+```
+
+```json
+{
+  "status": "loaded",
+  "id": "microsoft/Phi-4-mini-instruct-onnx",
+  "kind": "LLM",
+  "model": "microsoft/Phi-4-mini-instruct-onnx",
+  "source": "huggingface",
+  "devices": "0",
+  "max_batch_size": 8,
+  "max_seq_len": 4096
+}
+```
+
+### 7.5 Chat Completions
+
+```
+POST /api/v1/chat/completions
+Content-Type: application/json
+```
+
+Tokens are streamed back as Server-Sent Events when `stream` is true,
+or returned as a single OpenAI `chat.completion` JSON object when `stream`
+is false or omitted (OpenAI default). The conversation (user message +
+assistant reply) is automatically persisted to the configured database after
+generation finishes.
+
+Serve runs an {@code InferenceEngine} continuous-batching loop (Fluid Injection
+admission, chunked prefill, batched decode, Instant Eviction on abort). Offline
+library callers may still use {@code LanguageModel.generate}; HTTP chat always
+goes through the engine. Client disconnect on an SSE stream aborts the
+{@code GenerationHandle}, which Instant-Evicts that request's KV pages without
+stopping peer in-flight generations.
+
+**Request body fields (`snake_case`):**
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `model` | `string` | loaded model | Must match the loaded model id when set (HF repo id or local directory name); omit/empty to use the loaded model |
+| `messages` | `Message[]` | *required* | Ordered dialog turns |
+| `conversation` | `string` | `null` | Existing conversation id (`conv_<n>`) to append to |
+| `max_tokens` | `int` | remaining context | Max new tokens (legacy OpenAI name). Default: `max-model-len − prompt_len` |
+| `max_completion_tokens` | `int` | — | Alias for `max_tokens`; takes precedence when set |
+| `temperature` | `double` | `0.6` | Sampling temperature (higher = more random) |
+| `top_p` | `double` | `0.9` | Nucleus-sampling threshold |
+| `logprobs` | `boolean` | `false` | Include log-probabilities |
+| `seed` | `long` | `0` | Random seed (0 = non-deterministic) |
+| `stream` | `boolean` | `false` | `true` → SSE chunks; `false`/omitted → single `chat.completion` JSON |
+| `tools` | `array` | — | OpenAI tool definitions (`type: function`) for Qwen3 / Qwen3.5 / Qwen3.8 |
+| `tool_choice` | `string\|object` | `auto` | `auto` / `none` / `required` / `{"type":"function","function":{"name":"…"}}` |
+| `parallel_tool_calls` | `boolean` | `true` | Allow multiple tool calls in one assistant turn |
+
+Each `Message` has a `role` (`system`, `user`, `assistant`, or `tool`) and `content`.
+Assistant turns may include `tool_calls`; tool-result turns use `role: "tool"` and `tool_call_id`.
+Legacy `"ipython"` is accepted as an alias for `"tool"`.
+
+#### Tool calling (Qwen3 / Qwen3.5 / Qwen3.8)
+
+OpenAI-compatible tool calling is supported for latest Qwen checkpoints (XML
+`<tool_call>` format). Clients run tools locally and continue the dialog:
+
+```shell
+curl -X POST http://localhost:8080/api/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "messages": [{"role": "user", "content": "What is the weather in SF?"}],
+    "tools": [{
+      "type": "function",
+      "function": {
+        "name": "get_current_temperature",
+        "description": "Get temperature for a location",
+        "parameters": {
+          "type": "object",
+          "properties": {"location": {"type": "string"}},
+          "required": ["location"]
+        }
+      }
+    }],
+    "tool_choice": "auto"
+  }'
+```
+
+A successful tool-call response uses `finish_reason: "tool_calls"` and
+`message.tool_calls[]`. Append tool results as `{"role":"tool","tool_call_id":"…","content":"…"}`
+and call again for the final answer. Streaming (v1) buffers the completion and
+replays `delta.tool_calls` at the end (not token-true XML streaming).
+
+Smoke test with the OpenAI Python SDK:
+
+```shell
+python serve/scripts/test_tool_calling.py --base-url http://localhost:8888/api/v1
+```
+
+**Streaming example (`stream: true`):**
+
+```shell
+curl -X POST http://localhost:8080/api/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -N \
+  -d '{
+    "stream": true,
+    "messages": [
+      {"role": "system",  "content": "You are a helpful assistant."},
+      {"role": "user",    "content": "What is the capital of France?"}
+    ],
+    "max_tokens": 256,
+    "temperature": 0.7
+  }'
+```
+
+The response is an SSE stream of OpenAI-shaped `chat.completion.chunk` JSON
+events, terminated by `data: [DONE]`.
+
+**Non-streaming example (`stream` omitted or `false`):**
+
+```shell
+curl -X POST http://localhost:8080/api/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "messages": [
+      {"role": "user", "content": "What is the capital of France?"}
+    ],
+    "max_completion_tokens": 256
+  }'
+```
+
+```json
+{
+  "id": "chatcmpl-...",
+  "object": "chat.completion",
+  "created": 1741900000,
+  "model": "meta-llama/Llama-3.1-8B-Instruct",
+  "choices": [
+    {
+      "index": 0,
+      "message": { "role": "assistant", "content": "Paris." },
+      "logprobs": null,
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 20,
+    "completion_tokens": 3,
+    "total_tokens": 23
+  }
+}
+```
+
+**Example — continue a previous conversation:**
+
+```shell
+curl -X POST http://localhost:8080/api/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -N \
+  -d '{
+    "conversation": 42,
+    "messages": [
+      {"role": "user", "content": "What about Germany?"}
+    ]
+  }'
+```
+
+### 7.6 Conversation History API
+
+Chat history is stored in a relational database (PostgreSQL in production,
+H2 in dev mode). The API base path is `/api/v1/conversations`.
+
+Conversations are **scoped to authenticated users**. Guests (no session) may
+still create conversations and chat, but those rows are tied to client IP and
+do not appear in the sidebar list until the user signs in (recent guest threads
+from the same IP within 24 hours are merged on login).
+
+On **`localhost` or `127.0.0.1`** (any port), the server auto-logs you in as
+the local **`me`** account so dev workflows work without OAuth.
+
+#### Authentication
+
+The authentication endpoints manage user identity specifically for conversation
+history and personal settings. Note that this is a session-cookie identity
+mechanism intended for personal use and UI convenience, not an enterprise
+authentication or authorization system: enterprise access control belongs to the
+API gateway layer, and ML/ONNX inference endpoints are intentionally unauthenticated
+at the engine level.
+
+| Endpoint | Description |
+|---|---|
+| `GET /api/v1/auth/me` | Current user (`logged_in`, `user` profile) or guest |
+| `GET /api/v1/auth/login/google` | Redirect to Google OAuth (requires config below) |
+| `GET /api/v1/auth/callback/google` | OAuth callback (sets session cookie) |
+| `POST /api/v1/auth/logout` | Clear session |
+| `GET /api/v1/users/me` | Profile (authenticated) |
+| `PATCH /api/v1/users/me` | Update display name, avatar URL, personal instructions |
+
+Configure Google login in `application.properties` (or env):
+
+```properties
+smile.auth.google.client-id=${GOOGLE_CLIENT_ID}
+smile.auth.google.client-secret=${GOOGLE_CLIENT_SECRET}
+# Optional; default is {origin}/api/v1/auth/callback/google
+# smile.auth.google.redirect-uri=https://your-host/api/v1/auth/callback/google
+smile.auth.session-secret=${SMILE_SESSION_SECRET}
+```
+
+Register the redirect URI in Google Cloud Console. **Personal instructions**
+from the user profile are injected as the chat system prompt when logged in.
+
+Create, retrieve, update, and delete follow the
+[OpenAI Conversations](https://developers.openai.com/api/reference/resources/conversations)
+shapes. Conversation ids are strings of the form `conv_<n>`. List, `PATCH`
+(title/pin), and `GET .../items` are smile extensions.
+
+#### List conversations (smile extension, **requires login**)
+
+```
+GET /api/v1/conversations?pageIndex=0&pageSize=25&q=search&pinned=true
+```
+
+Returns the signed-in user's conversations (title, pinned, updated_at).
+Search matches **title and message content**.
+
+```shell
+curl "http://localhost:8080/api/v1/conversations?pageSize=10"
+```
+
+#### Create a conversation
+
+```
+POST /api/v1/conversations
+Content-Type: application/json
+```
+
+Optional body fields: `metadata` (≤16 string pairs) and `items` (≤20 message
+items with `role` + text `content`).
+
+```shell
+curl http://localhost:8080/api/v1/conversations \
+  -H "Content-Type: application/json" \
+  -d '{"metadata":{"topic":"demo"},"items":[{"type":"message","role":"user","content":"Hello!"}]}'
+```
+
+```json
+{
+  "id": "conv_1",
+  "object": "conversation",
+  "created_at": 1741900000,
+  "metadata": {"topic": "demo"}
+}
+```
+
+#### Retrieve a conversation
+
+```
+GET /api/v1/conversations/{conversation_id}
+```
+
+#### Update a conversation
+
+```
+POST /api/v1/conversations/{conversation_id}
+Content-Type: application/json
+```
+
+```shell
+curl http://localhost:8080/api/v1/conversations/conv_1 \
+  -H "Content-Type: application/json" \
+  -d '{"metadata":{"topic":"project-x"}}'
+```
+
+#### Patch sidebar fields (smile extension, **requires ownership**)
+
+```
+PATCH /api/v1/conversations/{conversation_id}
+Content-Type: application/json
+
+{"title": "My chat", "pinned": true}
+```
+
+#### Delete a conversation
+
+```
+DELETE /api/v1/conversations/{conversation_id}
+```
+
+```json
+{
+  "id": "conv_1",
+  "object": "conversation.deleted",
+  "deleted": true
+}
+```
+
+#### Get conversation messages (smile extension)
+
+```
+GET /api/v1/conversations/{conversation_id}/items?pageIndex=0&pageSize=25
+```
+
+Returns the individual message turns (`role` + `content` + `createdAt`)
+in chronological order.
+
+```shell
+curl http://localhost:8080/api/v1/conversations/conv_42/items
+```
+
+```json
+[
+  { "id": 1, "conversationId": 42, "role": "user",      "content": "What is the capital of France?", "createdAt": "2026-04-15T10:00:00Z" },
+  { "id": 2, "conversationId": 42, "role": "assistant", "content": "The capital of France is Paris.", "createdAt": "2026-04-15T10:00:02Z" }
+]
+```
+
+---
+
+### 7.7 LLM Serving Metrics
+
+LLM serving metrics are exposed through the unified Prometheus endpoint
+`GET /q/metrics` (see [§1.4](#14-health-and-metrics-endpoints)). Every series
+carries a `model_id` label (the public chat model id, or `unknown` when no model
+is loaded). The names follow the Prometheus convention: `_total` counters and
+seconds-based histograms.
+
+```shell
+curl http://localhost:8080/q/metrics | grep '^serve_llm_'
+```
+
+| Metric | Type | Description |
+|---|---|---|
+| `serve_llm_num_requests_running` | gauge | Chat requests currently running |
+| `serve_llm_num_requests_waiting` | gauge | Chat requests waiting for admission |
+| `serve_llm_kv_cache_usage_ratio` | gauge | Fraction of KV cache pages in use |
+| `serve_llm_prefix_cache_queries_total` | counter | Prompt tokens offered to the prefix cache |
+| `serve_llm_prefix_cache_hits_total` | counter | Prompt tokens served from the prefix cache |
+| `serve_llm_prompt_tokens_total` | counter | Total prompt tokens processed |
+| `serve_llm_generation_tokens_total` | counter | Total generated tokens |
+| `serve_llm_request_success_total` | counter | Successful requests, by `finished_reason` |
+| `serve_llm_request_prompt_tokens` | histogram | Prompt token count per request |
+| `serve_llm_request_generation_tokens` | histogram | Generated token count per request |
+| `serve_llm_time_to_first_token_seconds` | histogram | Time to first token |
+| `serve_llm_inter_token_latency_seconds` | histogram | Inter-token latency |
+| `serve_llm_request_time_per_output_token_seconds` | histogram | Mean time per output token |
+| `serve_llm_e2e_request_latency_seconds` | histogram | End-to-end request latency |
+| `serve_llm_request_prefill_time_seconds` | histogram | Prefill time (request start to first token) |
+| `serve_llm_request_decode_time_seconds` | histogram | Decode time (first token to completion) |
+
+The `serve_llm_request_success_total` counter is labelled by `finished_reason`
+(`stop`, `length`, or `tool_calls`).
+
+---
+
+## 8. Web UI
+
+A React-based web interface is bundled via [Quarkus Quinoa](https://quarkiverse.github.io/quarkiverse-docs/quarkus-quinoa/dev/).
+It is served from the root URL and provides:
+
+- **Inference UI** (`/infer`) — unified model shell: **collapsible** sidebar lists
+  **chat**, **SMILE** (`.sml`), and **ONNX** (`.onnx`) models. Selecting a chat
+  model embeds the chat module with a **collapsible right nav** (history, login,
+  settings). SMILE models get a schema-driven form; ONNX models get a numeric
+  form from tensor shapes, or an image upload when a 4-D vision-like input is
+  detected (overrideable).
+- **Chat UI** (`/chat`) — standalone chat with the same **right nav panel**
+  (New Chat always available; history/login/settings when signed in). Streaming
+  tokens, Markdown/math. On localhost, you are auto-signed-in as **`me`**.
+
+Full UI/auth design: [docs/chat-sidebar-plan.md](docs/chat-sidebar-plan.md).
+
+In dev mode the React development server runs on port **5173** and requests
+are proxied to the Quarkus backend. The production build (`dist/`) is served
+statically by the Quarkus process.
+
+---
+
+## 9. Database
+
+Chat conversation history requires a relational database.
+
+| Profile | Backend | URL |
+|---|---|---|
+| Production | PostgreSQL | `jdbc:postgresql://localhost:5432/smile` |
+| Dev | SQLite | `jdbc:sqlite:./smile_serve.db` |
+| Test | H2 (in-memory) | `jdbc:h2:mem:test;DB_CLOSE_DELAY=-1` |
+
+To enable the database in production set:
+
+```properties
+quarkus.hibernate-orm.active=true
+quarkus.datasource.username=<user>
+quarkus.datasource.password=<password>
+```
+
+Hibernate ORM uses `drop-and-create` by default. Change the strategy in
+production to `update` or `validate`:
+
+```properties
+quarkus.hibernate-orm.schema-management.strategy=update
+```
+
+The database is **not required** for the ML or ONNX inference endpoints — only
+for chat conversation persistence.
+
+---
+
+## 10. Testing
+
+```shell
+./gradlew :serve:test
+```
+
+Container images can be smoke-tested after a build with `serve/src/test/docker/smoke-test.sh`. It starts the image
+with a few tiny models and checks health, Prometheus metrics, the web UI, SMILE prediction with SHAP, LDA (native
+BLAS/LAPACK), ONNX inference, the database-backed endpoints, and, optionally, CPU chat completions (streaming and not):
+
+```shell
+serve/src/test/docker/smoke-test.sh quarkus/smile-serve-native
+serve/src/test/docker/smoke-test.sh quarkus/smile-serve-native-micro --flavor micro
+serve/src/test/docker/smoke-test.sh quarkus/smile-serve-jvm \
+    --chat-model microsoft/Phi-4-mini-instruct-onnx --hf-home /path/to/huggingface
+```
+
+The `micro` flavor instead checks that the chat and auth endpoints are absent (404). The exit status is non-zero if any
+check fails. It needs docker, curl and python3 on the host; the GPU image is not covered.
+
+The test profile (`%test.*`) configures the service with:
+
+- An in-memory H2 database (no external database required).
+- A pre-trained iris random forest model from
+  `serve/src/test/resources/model/iris_random_forest.sml`.
+- The ONNX model path also pointed at the test resources directory
+  (no `.onnx` files present by default, so `OnnxService` starts empty).
+- The chat model path set to a non-existent path so `ChatService` starts
+  gracefully unavailable without attempting to load a GPU model.
+
+The test class `InferenceResourceTest` covers:
+
+| Test | Endpoint | Scenario |
+|---|---|---|
+| `testGetModelMetadata` | `GET /smile/{id}` | Returns algorithm, schema, and nullability |
+| `testGetUnknownModelReturns404` | `GET /smile/{id}` | 404 for unknown ID |
+| `testPredictJsonReturnsPredictionAndProbabilities` | `POST /smile/{id}` | Correct label + probabilities |
+| `testPredictJsonWithZeroFeaturesReturnsValidPrediction` | `POST /smile/{id}` | Edge case: all-zero features |
+| `testPredictJsonMissingFieldReturns400` | `POST /smile/{id}` | 400 for missing field |
+| `testPredictUnknownModelReturns404` | `POST /smile/{id}` | 404 for unknown model |
+| `testStreamCsvReturnsPredictions` | `POST /smile/{id}/stream` | 3 CSV rows → 3 SSE data lines |
+| `testStreamJsonLinesReturnsPredictions` | `POST /smile/{id}/stream` | 2 JSON-lines → 2 SSE data lines |
+| `testStreamCsvTooFewColumnsEmitsNoPredictions` | `POST /smile/{id}/stream` | Bad CSV closes stream |
+| `testStreamUnknownModelReturns404` | `POST /smile/{id}/stream` | 404 before stream starts |
+
+---
+
+## API Quick Reference
+
+### System & Health — `/api/v1`
+
+| Method | Path | Description |
+|---|---|---|
+| `POST` | `/models/load` | Dynamically load a model (.sml, .onnx, or LLM) into active memory (localhost only) |
+
+### Operational — `/q`
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/q/health` | Aggregate health check (SmallRye Health) |
+| `GET` | `/q/health/live` | Liveness probe for Kubernetes `livenessProbe` |
+| `GET` | `/q/health/ready` | Readiness probe for Kubernetes `readinessProbe` |
+| `GET` | `/q/health/started` | Startup probe |
+| `GET` | `/q/metrics` | Prometheus scrape endpoint (all models) |
+
+### Classic ML — `/api/v1/smile`
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/smile/{id}` | Get model metadata and schema |
+| `GET` | `/smile/{id}/health` | Model health status and active request count |
+| `POST` | `/smile/{id}` | Single JSON inference |
+| `POST` | `/smile/{id}/stream` | Streaming CSV or JSON-lines inference |
+| `POST` | `/smile/{id}/reload` | Reload model from disk (localhost only) |
+| `POST` | `/smile/{id}/unload` | Gracefully unload model from memory (localhost only) |
+
+### ONNX — `/api/v1/onnx`
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/onnx/{id}` | Get graph info, input/output shapes |
+| `GET` | `/onnx/{id}/health` | ONNX model health status and active request count |
+| `POST` | `/onnx/{id}` | Single JSON inference |
+| `POST` | `/onnx/{id}/stream` | Streaming CSV or JSON-lines inference |
+| `POST` | `/onnx/{id}/reload` | Reload ONNX model from disk (localhost only) |
+| `POST` | `/onnx/{id}/unload` | Gracefully unload ONNX model from memory (localhost only) |
+
+### Chat — `/api/v1/models`, `/api/v1/chat`, `/api/v1/conversations`
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/models` | List all loaded models — chat, ONNX, SMILE (OpenAI-compatible) |
+| `GET` | `/models/{id}` | Retrieve a model by id (OpenAI-compatible) |
+| `POST` | `/chat/completions` | Chat completion — SSE when `stream: true`, JSON when `stream: false` |
+| `GET` | `/conversations` | List conversations (paginated; smile extension) |
+| `GET` | `/conversations/{conversation_id}` | Retrieve conversation (OpenAI-compatible) |
+| `POST` | `/conversations` | Create conversation (OpenAI-compatible) |
+| `POST` | `/conversations/{conversation_id}` | Update conversation metadata (OpenAI-compatible) |
+| `DELETE` | `/conversations/{conversation_id}` | Delete conversation (OpenAI-compatible) |
+| `GET` | `/conversations/{conversation_id}/items` | List message turns (paginated; smile extension) |
+
+
+---
+
+*SMILE Serve is free software under the GNU Affero General Public License v3. For commercial licensing and pricing see https://www.aihalo.dev/licensing.html or contact sales@aihalo.dev.*
+

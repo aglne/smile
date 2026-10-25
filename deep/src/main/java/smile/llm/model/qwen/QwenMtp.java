@@ -1,0 +1,559 @@
+/*
+ * Copyright (c) 2010-2026 Haifeng Li. All rights reserved.
+ *
+ * SMILE is free software: you can redistribute it and/or modify it
+ * under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * SMILE is distributed in the hope that it will be useful, but
+ * WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with SMILE. If not, see <https://www.gnu.org/licenses/>.
+ */
+package smile.llm.model.qwen;
+
+import java.lang.foreign.MemorySegment;
+import java.util.ArrayList;
+import java.util.List;
+import smile.deep.layer.EmbeddingLayer;
+import smile.deep.layer.LayerBlock;
+import smile.deep.layer.LinearLayer;
+import smile.deep.tensor.Device;
+import smile.deep.tensor.Index;
+import smile.deep.tensor.ScalarType;
+import smile.deep.tensor.Tensor;
+import smile.llm.cache.KvCacheLayout;
+import smile.llm.cache.KvCachePool;
+import smile.llm.parallel.TensorParallelGroup;
+import smile.llm.parallel.TensorShardSpec;
+import smile.util.AutoScope;
+
+import static smile.torch.smile_torch_h.smile_module_free;
+import static smile.torch.smile_torch_h.smile_module_list_as_module;
+import static smile.torch.smile_torch_h.smile_module_list_create;
+import static smile.torch.smile_torch_h.smile_module_list_free;
+import static smile.torch.smile_torch_h.smile_module_list_push_back;
+
+/**
+ * Qwen3.5/3.8 native multi-token prediction (MTP) draft head.
+ *
+ * <p>Fuses the previous backbone hidden state with the embedding of the last
+ * sampled token ({@code pre_fc_norm_*} + {@code fc}), runs one or more full-attention
+ * transformer blocks, applies {@code norm}, then scores with the shared
+ * {@code lm_head}. Multi-step drafts chain this module autoregressively
+ * (NEXTN-style).
+ *
+ * @author Haifeng Li
+ */
+public class QwenMtp extends LayerBlock {
+    final QwenModelArgs params;
+    final int numLayers;
+    final QwenRMSNorm preFcNormHidden;
+    final QwenRMSNorm preFcNormEmbedding;
+    final LinearLayer fc;
+    final List<QwenBlock> layers;
+    final QwenRMSNorm norm;
+    /** Shared with the backbone (not owned). */
+    EmbeddingLayer tokEmbeddings;
+    /** Shared with the backbone (not owned). */
+    LinearLayer lmHead;
+    /** Shared RoPE tables from the backbone (not owned). */
+    PartialRotaryEncoding.CosSin rope;
+    KvCachePool kvCachePool;
+    final TensorShardSpec shard;
+    final TensorParallelGroup tpGroup;
+
+    /**
+     * Constructs MTP modules on CPU. Call {@link #to(Device)} after weight load;
+     * then {@link #bindShared} and {@link #setKvCachePool}.
+     *
+     * @param args    backbone args ({@link QwenModelArgs#mtpNumHiddenLayers()} {@code > 0}).
+     * @param shard   TP shard, or {@code null}.
+     * @param tpGroup TP group, or {@code null}.
+     */
+    public QwenMtp(QwenModelArgs args, TensorShardSpec shard, TensorParallelGroup tpGroup) {
+        if (args.mtpNumHiddenLayers() < 1) {
+            throw new IllegalArgumentException("mtpNumHiddenLayers must be >= 1");
+        }
+        this.params = args;
+        this.numLayers = args.mtpNumHiddenLayers();
+        this.shard = shard;
+        this.tpGroup = tpGroup;
+
+        String[] layerTypes = new String[numLayers];
+        java.util.Arrays.fill(layerTypes, QwenModelArgs.FULL_ATTENTION);
+        // Synthetic args: full-attn only, short KV window for draft depth.
+        int mtpSeq = QwenModelArgs.MAX_SPECULATIVE_TOKENS + 2;
+        QwenModelArgs mtpArgs = new QwenModelArgs(
+                args.dim(), numLayers, args.numHeads(), args.numKvHeads(), args.headDim(),
+                args.vocabSize(), args.intermediateSize(), args.normEps(), args.ropeTheta(),
+                args.partialRotaryFactor(), args.linearConvKernelDim(), args.linearKeyHeadDim(),
+                args.linearValueHeadDim(), args.linearNumKeyHeads(), args.linearNumValueHeads(),
+                layerTypes, args.maxBatchSize(), mtpSeq, 0, 0);
+
+        this.preFcNormHidden = new QwenRMSNorm(args.dim(), args.normEps());
+        this.preFcNormEmbedding = new QwenRMSNorm(args.dim(), args.normEps());
+        this.fc = new LinearLayer(args.dim() * 2, args.dim(), false);
+        this.norm = new QwenRMSNorm(args.dim(), args.normEps());
+        this.layers = new ArrayList<>();
+        MemorySegment moduleList = smile_module_list_create();
+        for (int i = 0; i < numLayers; i++) {
+            var block = new QwenBlock(i, mtpArgs, null, shard, tpGroup);
+            layers.add(block);
+            smile_module_list_push_back(moduleList, block.module);
+        }
+        MemorySegment listAsModule = smile_module_list_as_module(moduleList);
+        add("layers", listAsModule);
+        smile_module_free(listAsModule);
+        smile_module_list_free(moduleList);
+        add("pre_fc_norm_hidden", preFcNormHidden);
+        add("pre_fc_norm_embedding", preFcNormEmbedding);
+        add("fc", fc);
+        add("norm", norm);
+    }
+
+    /**
+     * Binds shared backbone embeddings, LM head, and RoPE tables.
+     *
+     * @param embeddings token embeddings.
+     * @param lmHead     vocabulary projection.
+     * @param rope       partial RoPE cos/sin tables.
+     */
+    public void bindShared(EmbeddingLayer embeddings, LinearLayer lmHead,
+                           PartialRotaryEncoding.CosSin rope) {
+        this.tokEmbeddings = embeddings;
+        this.lmHead = lmHead;
+        this.rope = rope;
+    }
+
+    /**
+     * Installs an MTP-local KV pool and wires full-attention layers.
+     *
+     * @param pool           MTP KV pool.
+     * @param closePrevious  whether to close a previous pool.
+     */
+    public void setKvCachePool(KvCachePool pool, boolean closePrevious) {
+        if (pool == null) {
+            throw new IllegalArgumentException("pool must not be null");
+        }
+        var previous = this.kvCachePool;
+        this.kvCachePool = pool;
+        for (var layer : layers) {
+            if (layer.selfAttn != null) {
+                layer.selfAttn.setCachePool(pool);
+            }
+        }
+        if (closePrevious && previous != null && previous != pool) {
+            previous.close();
+        }
+    }
+
+    /**
+     * Returns the MTP KV layout for a short draft window.
+     *
+     * @return MTP KV layout for a short draft window.
+     */
+    public KvCacheLayout kvCacheLayout() {
+        int kvHeads = shard != null && shard.tpSize() > 1 ? shard.numKvHeads() : params.numKvHeads();
+        return new KvCacheLayout(numLayers, kvHeads, params.headDim(),
+                params.maxBatchSize(), QwenModelArgs.MAX_SPECULATIVE_TOKENS + 2);
+    }
+
+    /**
+     * Returns the MTP KV pool.
+     *
+     * @return MTP KV pool, or {@code null} before install.
+     */
+    public KvCachePool kvCachePool() {
+        return kvCachePool;
+    }
+
+    /**
+     * Returns the MTP transformer blocks (their projections are loaded like the main model's).
+     *
+     * @return the blocks, in order.
+     */
+    public List<QwenBlock> blocks() {
+        return layers;
+    }
+
+    /**
+     * Returns the number of MTP transformer layers.
+     *
+     * @return number of MTP transformer layers.
+     */
+    public int numLayers() {
+        return numLayers;
+    }
+
+    /**
+     * One MTP draft step (single logical request; broadcasts {@code position}
+     * to every row of a batch — only correct when every row is truly at the
+     * same absolute position). Prefer {@link #draftStep(Tensor, Tensor, int[], int)}
+     * for the request-pooled batched path.
+     *
+     * @param tokenIds     token ids {@code [B]} (last sampled / previous draft).
+     * @param prevHidden   previous hidden {@code [B, D]} (backbone or prior MTP).
+     * @param position     absolute RoPE / cache write position for this step.
+     * @param draftStep    zero-based index within the current draft window (MTP KV).
+     * @return logits {@code [B, V]} in float32 (caller owns).
+     */
+    public Tensor draftStep(Tensor tokenIds, Tensor prevHidden, int position, int draftStep) {
+        int[] positions = new int[(int) tokenIds.shape()[0]];
+        java.util.Arrays.fill(positions, position);
+        return draftStep(tokenIds, prevHidden, positions, draftStep);
+    }
+
+    /**
+     * One MTP draft step: fuse embedding(token) with previous hidden, run layers,
+     * return float logits {@code [B, V]} and update {@code lastDraftHidden} with
+     * the pre-lm-head hidden for the next draft step.
+     *
+     * @param tokenIds     token ids {@code [B]} (last sampled / previous draft).
+     * @param prevHidden   previous hidden {@code [B, D]} (backbone or prior MTP).
+     * @param positions    absolute RoPE / cache write position per batch row —
+     *                     concurrent requests are generally at different
+     *                     absolute positions, unlike the relative in-round
+     *                     {@code draftStep} index below.
+     * @param draftStep    zero-based index within the current draft window (MTP KV);
+     *                     uniform across the batch — every row in a round is always
+     *                     at the same relative draft-step.
+     * @return logits {@code [B, V]} in float32 (caller owns).
+     */
+    public Tensor draftStep(Tensor tokenIds, Tensor prevHidden, int[] positions, int draftStep) {
+        if (tokEmbeddings == null || lmHead == null || rope == null) {
+            throw new IllegalStateException("MTP shared bindings not installed; call bindShared");
+        }
+        if (kvCachePool == null) {
+            throw new IllegalStateException("MTP KV pool not installed; call setKvCachePool");
+        }
+        AutoScope scope = new AutoScope();
+        Tensor.push(scope);
+        try {
+            Tensor tokens = tokenIds.dim() == 1 ? tokenIds.unsqueeze(1) : tokenIds;
+            Tensor embed = tokEmbeddings.forward(tokens);
+            Tensor prev = prevHidden.dim() == 2 ? prevHidden.unsqueeze(1) : prevHidden;
+            Tensor hNorm = preFcNormHidden.forward(prev);
+            if (prev != prevHidden) {
+                prev.close();
+            }
+            Tensor eNorm = preFcNormEmbedding.forward(embed);
+            Tensor fused = PartialRotaryEncoding.concatLast(eNorm, hNorm);
+            Tensor h = fc.forward(fused);
+            embed.close();
+            hNorm.close();
+            eNorm.close();
+            fused.close();
+
+            Tensor cos = PartialRotaryEncoding.gather(rope.cos(), positions);
+            Tensor sin = PartialRotaryEncoding.gather(rope.sin(), positions);
+            int[] cacheSteps = new int[(int) h.shape()[0]];
+            java.util.Arrays.fill(cacheSteps, draftStep);
+            for (QwenBlock layer : layers) {
+                Tensor next = layer.forward(h, cacheSteps, cos, sin, null);
+                h.close();
+                h = next;
+            }
+            cos.close();
+            sin.close();
+
+            Tensor normalized = norm.forward(h);
+            h.close();
+            Tensor logitsF = lmHead.forward(normalized);
+            Tensor logits = logitsF.to(ScalarType.Float);
+            if (logits != logitsF) {
+                logitsF.close();
+            }
+            if (lastDraftHidden != null) {
+                lastDraftHidden.close();
+            }
+            // NEXTN chains the post-norm MTP hidden (pre-lm_head).
+            lastDraftHidden = normalized.detach();
+            lastDraftHidden.detachFromScopes();
+            logits.promoteToParent();
+            return logits;
+        } finally {
+            Tensor.pop();
+        }
+    }
+
+    /**
+     * History-aware MTP step: fuses {@code m} consecutive positions
+     * {@code [startPos, startPos+m)} of one request, writes their K/V into the
+     * (persistent, request-bound) MTP KV pool, and attends over the request's
+     * <em>entire</em> MTP history {@code [0, startPos+m)} — unlike
+     * {@link #draftStep}, whose per-round pool only ever contains the current
+     * round's own draft positions (so the head never sees the prompt).
+     *
+     * <p>Position {@code i}'s input is {@code (token t_{i+1}, backbone hidden h_i)}
+     * and is stored at RoPE/KV position {@code i}, matching vLLM's Qwen3.5 MTP
+     * proposer. The caller must have activated the MTP pool for the request.
+     * Always refreshes {@link #lastDraftHidden()} with the last row's post-norm
+     * hidden {@code [1, 1, D]} (the next chained draft step's input).
+     *
+     * @param tokens     next-token ids {@code [1, m]} (int64, on this device).
+     * @param hidden     backbone/MTP hidden {@code [1, m, D]}.
+     * @param startPos   absolute position of the first row.
+     * @param wantLogits whether to score the last row with the shared LM head.
+     * @return float logits {@code [1, 1, V]} for the last row, or {@code null}.
+     */
+    public Tensor absorb(Tensor tokens, Tensor hidden, int startPos, boolean wantLogits) {
+        if (tokEmbeddings == null || lmHead == null || rope == null) {
+            throw new IllegalStateException("MTP shared bindings not installed; call bindShared");
+        }
+        if (kvCachePool == null) {
+            throw new IllegalStateException("MTP KV pool not installed; call setKvCachePool");
+        }
+        int m = (int) tokens.shape()[1];
+        AutoScope scope = new AutoScope();
+        Tensor.push(scope);
+        try {
+            Tensor embed = tokEmbeddings.forward(tokens);
+            Tensor hNorm = preFcNormHidden.forward(hidden);
+            Tensor eNorm = preFcNormEmbedding.forward(embed);
+            Tensor fused = PartialRotaryEncoding.concatLast(eNorm, hNorm);
+            Tensor h = fc.forward(fused);
+
+            Tensor cos;
+            Tensor sin;
+            try (var pos = Index.slice(startPos, startPos + m)) {
+                cos = rope.cos().get(pos);
+                sin = rope.sin().get(pos);
+            }
+            Tensor mask = null;
+            if (m > 1) {
+                var maskOpts = new Tensor.Options()
+                        .device(h.device()).dtype(ScalarType.Float).requireGradients(false);
+                mask = Tensor.zeros(maskOpts, m, m).fill_(Float.NEGATIVE_INFINITY);
+                mask.triu_(1);
+                if (startPos > 0) {
+                    try (var zeros = Tensor.zeros(maskOpts, m, startPos)) {
+                        Tensor prev = mask;
+                        mask = Tensor.hstack(zeros, prev);
+                        prev.close();
+                    }
+                }
+                if (mask.dtype() != h.dtype()) {
+                    Tensor maskF = mask;
+                    mask = maskF.to(h.dtype());
+                    maskF.close();
+                }
+            }
+            int[] start = {startPos};
+            for (QwenBlock layer : layers) {
+                Tensor next = layer.forward(h, start, cos, sin, mask);
+                h.close();
+                h = next;
+            }
+            Tensor normalized = norm.forward(h);
+            h.close();
+
+            Tensor lastRow;
+            try (var last = Index.slice(m - 1, m)) {
+                lastRow = normalized.get(Index.Colon, last);
+            }
+            if (lastDraftHidden != null) {
+                lastDraftHidden.close();
+            }
+            lastDraftHidden = lastRow.copy();
+            lastDraftHidden.detachFromScopes();
+
+            Tensor logits = null;
+            if (wantLogits) {
+                Tensor logitsF = lmHead.forward(lastRow);
+                logits = logitsF.to(ScalarType.Float);
+                if (logits != logitsF) {
+                    logitsF.close();
+                }
+                logits.promoteToParent();
+            }
+            return logits;
+        } finally {
+            Tensor.pop();
+        }
+    }
+
+    /** Last MTP hidden (pre-lm-head) from {@link #draftStep}; owned by this module. */
+    Tensor lastDraftHidden;
+
+    /**
+     * Returns the last draft hidden from the most recent {@link #draftStep}.
+     *
+     * @return last draft hidden {@code [B, 1, D]} or {@code [B, D]}, or {@code null}.
+     */
+    public Tensor lastDraftHidden() {
+        return lastDraftHidden;
+    }
+
+    /**
+     * Clears MTP KV for a new single-request speculative round (bind capacity
+     * for the draft window). Prefer {@link #beginRound(int, int)} for the
+     * request-pooled batched path.
+     *
+     * @param draftWindow number of draft steps to reserve.
+     */
+    public void beginRound(int draftWindow) {
+        beginRound(1, draftWindow);
+    }
+
+    /**
+     * Clears MTP KV for a new speculative round sized for {@code batchSize}
+     * concurrent requests, each reserving {@code draftWindow + 1} slots.
+     *
+     * @param batchSize   number of concurrent requests in this round's cohort.
+     * @param draftWindow number of draft steps to reserve per request.
+     */
+    public void beginRound(int batchSize, int draftWindow) {
+        if (kvCachePool == null) {
+            return;
+        }
+        int cap = Math.max(1, draftWindow + 1);
+        kvCachePool.unbindRequests();
+        kvCachePool.bindRequests(Math.max(1, batchSize), cap);
+    }
+
+    /**
+     * Batched, history-aware MTP step for a cohort of concurrent requests, each at its own
+     * absolute position. Writes K/V for every column of every row into the persistent
+     * request-bound pool and attends over each row's whole history, like {@link #absorb}.
+     *
+     * <p>Rows are padded to a common width {@code S}: row {@code i} has {@code lastRealRow[i]+1}
+     * real columns (positions {@code startPositions[i]..}) followed by dummy columns. Dummy
+     * columns come <em>after</em> the real ones, so causal attention keeps real columns
+     * unaffected; their K/V lands in the row's speculative region (past its committed
+     * history) and is overwritten before it can be read. The logits and chained hidden are
+     * taken at each row's last real column.
+     *
+     * @param tokens         next-token ids {@code [B, S]} (int64, on this device).
+     * @param hidden         backbone/MTP hidden {@code [B, S, D]}.
+     * @param startPositions absolute KV/RoPE position of column 0, per row.
+     * @param lastRealRow    index of each row's last real column, in {@code [0, S)}.
+     * @return float logits {@code [B, 1, V]} for each row's last real column. The chained
+     *         hidden {@code [B, 1, D]} is available from {@link #lastDraftHidden()}.
+     */
+    public Tensor absorbBatch(Tensor tokens, Tensor hidden, int[] startPositions, int[] lastRealRow) {
+        if (tokEmbeddings == null || lmHead == null || rope == null) {
+            throw new IllegalStateException("MTP shared bindings not installed; call bindShared");
+        }
+        if (kvCachePool == null) {
+            throw new IllegalStateException("MTP KV pool not installed; call setKvCachePool");
+        }
+        int b = (int) tokens.shape()[0];
+        int s = (int) tokens.shape()[1];
+        if (startPositions.length != b || lastRealRow.length != b) {
+            throw new IllegalArgumentException("per-row arrays must match batch size " + b);
+        }
+        AutoScope scope = new AutoScope();
+        Tensor.push(scope);
+        try {
+            Tensor embed = tokEmbeddings.forward(tokens);
+            Tensor hNorm = preFcNormHidden.forward(hidden);
+            Tensor eNorm = preFcNormEmbedding.forward(embed);
+            Tensor fused = PartialRotaryEncoding.concatLast(eNorm, hNorm);
+            Tensor h = fc.forward(fused);
+
+            Tensor cos = PartialRotaryEncoding.gatherWindow(rope.cos(), startPositions, s);
+            Tensor sin = PartialRotaryEncoding.gatherWindow(rope.sin(), startPositions, s);
+            // The attention layer's ragged path (rows at different positions) ignores the mask and
+            // uses the kernel's own causal mode, but when every row happens to share a position it
+            // takes the uniform path, which needs an explicit dense causal mask for S > 1.
+            Tensor mask = null;
+            if (s > 1) {
+                var maskOpts = new Tensor.Options()
+                        .device(h.device()).dtype(ScalarType.Float).requireGradients(false);
+                mask = Tensor.zeros(maskOpts, s, s).fill_(Float.NEGATIVE_INFINITY);
+                mask.triu_(1);
+                if (startPositions[0] > 0) {
+                    try (var zeros = Tensor.zeros(maskOpts, s, startPositions[0])) {
+                        Tensor prev = mask;
+                        mask = Tensor.hstack(zeros, prev);
+                        prev.close();
+                    }
+                }
+                if (mask.dtype() != h.dtype()) {
+                    Tensor maskF = mask;
+                    mask = maskF.to(h.dtype());
+                    maskF.close();
+                }
+            }
+            for (QwenBlock layer : layers) {
+                Tensor next = layer.forward(h, startPositions, cos, sin, mask);
+                h.close();
+                h = next;
+            }
+            Tensor normalized = norm.forward(h);
+            h.close();
+
+            Tensor lastRows;
+            if (s == 1) {
+                lastRows = normalized;
+            } else {
+                int[] flatIdx = new int[b];
+                for (int i = 0; i < b; i++) {
+                    flatIdx[i] = i * s + lastRealRow[i];
+                }
+                long dim = normalized.shape()[2];
+                try (Tensor flat = normalized.reshape((long) b * s, dim);
+                     var idx = Index.of(flatIdx);
+                     Tensor picked = flat.get(idx)) {
+                    lastRows = picked.reshape(b, 1, dim);
+                }
+            }
+            if (lastDraftHidden != null) {
+                lastDraftHidden.close();
+            }
+            lastDraftHidden = lastRows.copy();
+            lastDraftHidden.detachFromScopes();
+
+            Tensor logitsF = lmHead.forward(lastRows);
+            Tensor logits = logitsF.to(ScalarType.Float);
+            if (logits != logitsF) {
+                logitsF.close();
+            }
+            logits.promoteToParent();
+            return logits;
+        } finally {
+            Tensor.pop();
+        }
+    }
+
+    /** Drops the chained draft hidden (history-aware path keeps the KV pool bound). */
+    public void clearDraftHidden() {
+        if (lastDraftHidden != null) {
+            lastDraftHidden.close();
+            lastDraftHidden = null;
+        }
+    }
+
+    /** Releases MTP draft KV after a speculative round. */
+    public void endRound() {
+        if (kvCachePool != null) {
+            kvCachePool.unbindRequests();
+        }
+        if (lastDraftHidden != null) {
+            lastDraftHidden.close();
+            lastDraftHidden = null;
+        }
+    }
+
+    @Override
+    public QwenMtp to(Device device) {
+        super.to(device);
+        return this;
+    }
+
+    @Override
+    public QwenMtp to(Device device, ScalarType dtype) {
+        super.to(device, dtype);
+        return this;
+    }
+
+    @Override
+    public Tensor forward(Tensor input) {
+        throw new UnsupportedOperationException("Use draftStep for MTP forwards");
+    }
+}

@@ -1,0 +1,158 @@
+/*
+ * Copyright (c) 2010-2026 Haifeng Li. All rights reserved.
+ *
+ * SMILE is free software: you can redistribute it and/or modify it
+ * under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * SMILE is distributed in the hope that it will be useful, but
+ * WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with SMILE. If not, see <https://www.gnu.org/licenses/>.
+ */
+package smile.llm;
+
+import java.util.Arrays;
+import java.util.List;
+
+/**
+ * Per-request chat options for tool calling.
+ *
+ * @param tools             available tools; {@code null} or empty means no tools.
+ * @param toolChoice        tool selection policy; {@code null} defaults to {@link ToolChoice#AUTO}.
+ * @param parallelToolCalls whether multiple tool calls in one turn are allowed.
+ * @param thinkingMode      {@link #THINKING_ENABLED}, {@link #THINKING_DISABLED}, {@link #THINKING_ADAPTIVE}, or
+ *                          {@code null} for the model's default (templates that support it).
+ * @param reasoningEffort   {@code xhigh}, {@code medium} or {@code low} for templates with a reasoning-effort
+ *                          setting (Qwen3.8); {@code null} for the template's default.
+ * @param preserveThinking  whether earlier assistant turns keep their reasoning in the prompt (Qwen3.8's
+ *                          {@code preserve_thinking}); {@code null} for the template's default.
+ * @author Haifeng Li
+ */
+public record ChatOptions(
+        ToolDefinition[] tools,
+        ToolChoice toolChoice,
+        boolean parallelToolCalls,
+        String thinkingMode,
+        String reasoningEffort,
+        Boolean preserveThinking) {
+
+    /** Thinking is requested before every answer. */
+    public static final String THINKING_ENABLED = "enabled";
+    /** The model answers without thinking. */
+    public static final String THINKING_DISABLED = "disabled";
+    /** The model decides whether to think. */
+    public static final String THINKING_ADAPTIVE = "adaptive";
+
+    /**
+     * Options without reasoning-effort or preserve-thinking preferences.
+     *
+     * @param tools             tool definitions; may be {@code null}.
+     * @param toolChoice        tool choice; {@code null} means auto.
+     * @param parallelToolCalls whether parallel tool calls are allowed.
+     * @param thinkingMode      thinking mode or {@code null}.
+     */
+    public ChatOptions(ToolDefinition[] tools, ToolChoice toolChoice, boolean parallelToolCalls,
+                       String thinkingMode) {
+        this(tools, toolChoice, parallelToolCalls, thinkingMode, null, null);
+    }
+
+    /**
+     * Options without a thinking-mode preference.
+     *
+     * @param tools             tool definitions; may be {@code null}.
+     * @param toolChoice        tool choice; {@code null} means auto.
+     * @param parallelToolCalls whether parallel tool calls are allowed.
+     */
+    public ChatOptions(ToolDefinition[] tools, ToolChoice toolChoice, boolean parallelToolCalls) {
+        this(tools, toolChoice, parallelToolCalls, null);
+    }
+
+    /**
+     * Returns a copy with another thinking mode.
+     *
+     * @param mode {@link #THINKING_ENABLED}, {@link #THINKING_DISABLED}, {@link #THINKING_ADAPTIVE} or {@code null}.
+     * @return the new options.
+     */
+    public ChatOptions withThinkingMode(String mode) {
+        return new ChatOptions(tools, toolChoice, parallelToolCalls, mode, reasoningEffort, preserveThinking);
+    }
+
+    /**
+     * Returns a copy with another reasoning effort.
+     *
+     * @param effort {@code xhigh}, {@code medium}, {@code low} or {@code null} for the template default.
+     * @return the new options.
+     */
+    public ChatOptions withReasoningEffort(String effort) {
+        return new ChatOptions(tools, toolChoice, parallelToolCalls, thinkingMode, effort, preserveThinking);
+    }
+
+    /**
+     * Returns a copy with another preserve-thinking preference.
+     *
+     * @param preserve whether earlier turns keep their reasoning, or {@code null} for the template default.
+     * @return the new options.
+     */
+    public ChatOptions withPreserveThinking(Boolean preserve) {
+        return new ChatOptions(tools, toolChoice, parallelToolCalls, thinkingMode, reasoningEffort, preserve);
+    }
+
+    /** Empty options (no tools). */
+    public static final ChatOptions NONE = new ChatOptions(null, ToolChoice.NONE, true);
+
+    /**
+     * Compact canonical constructor.
+     */
+    public ChatOptions {
+        if (tools != null) {
+            tools = Arrays.copyOf(tools, tools.length);
+        }
+        if (toolChoice == null) {
+            toolChoice = ToolChoice.AUTO;
+        }
+        if (thinkingMode != null && !THINKING_ENABLED.equals(thinkingMode)
+                && !THINKING_DISABLED.equals(thinkingMode) && !THINKING_ADAPTIVE.equals(thinkingMode)) {
+            throw new IllegalArgumentException("thinking mode must be enabled, disabled or adaptive: " + thinkingMode);
+        }
+    }
+
+    /**
+     * Returns whether tools should be injected into the chat template.
+     *
+     * @return {@code true} when tools should be injected into the chat template.
+     */
+    public boolean hasTools() {
+        return tools != null && tools.length > 0 && !(toolChoice instanceof ToolChoice.None);
+    }
+
+    /**
+     * Tools filtered for template injection (named choice → single function).
+     *
+     * @return tools to expose, or empty list when none.
+     */
+    public List<ToolDefinition> toolsForTemplate() {
+        if (!hasTools()) {
+            return List.of();
+        }
+        if (toolChoice instanceof ToolChoice.Named named) {
+            return Arrays.stream(tools)
+                    .filter(t -> named.name().equals(t.function().name()))
+                    .toList();
+        }
+        return List.of(tools);
+    }
+
+    /**
+     * Returns whether the tool-call output parser should run.
+     *
+     * @return {@code true} when the tool-call output parser should run.
+     */
+    public boolean parseToolCalls() {
+        return hasTools();
+    }
+}

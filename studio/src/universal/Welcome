@@ -1,0 +1,202 @@
+# Welcome to SMILE Studio
+
+Hand it the data, the code, or the company.
+
+Agent Studio is a coding agent on your machine, an AutoML workplace that builds the models for Serve Engine, and an operating system for startups. SMILE 7 was built here. HALO.AI runs in it. Free to evaluate. Annual seats cover production use.
+
+---
+
+## 1. Quick Start
+
+1. **Explore the Workspace**: The left pane shows your **Project Explorer** and **Kernel Explorer**; the center pane hosts your **Notebooks** and **Text Editors**; the right pane is home to your **AI Agent Team**.
+2. **Run Your First Code**:
+   - Click **File > New** (or press `Ctrl+N` / `Cmd+N`) to open a fresh Java notebook.
+   - Type an expression (e.g., `var x = 42; x * 2`) and press `Shift+Enter` to run the cell.
+3. **Engage with AI Agents**:
+   - Switch to the **📊 Clair** tab on the right and type `/help` or `/init` to set up your project.
+   - Ask Clair to load a dataset, build a model, or visualize patterns.
+4. **Browse Existing Notebooks**:
+   - In the Project Explorer, open the `notebooks/` directory to view sample workflows for classification, regression, clustering, Vega-Lite/Swing plots, and more.
+
+---
+
+## 2. Workspace Layout
+
+SMILE Studio uses a three-column horizontal split layout (resizable and persisted across sessions):
+
+```
+┌──────────────────────────────────────────────────────────────────────────────────────┐
+│  Menu Bar:  File  |  Cell  |  Find  |  Inference  |  Help                            │
+│  Toolbar:   [New] [Open] [Save] [Save As] | [Add Cell] [Run] [Clear] [Restart] [Stop]│
+├───────────────────┬─────────────────────────────────┬────────────────────────────────┤
+│  Explorer Tabs    │  Notebook & Editor Tabs         │  AI Agent Team                 │
+│  ┌────────┬──────┐│  ┌───────────┬───────────────┐  │  👔 Frank  | 💡 Steve          │
+│  │Project │Kernel││  │ Welcome   │ Release Notes │  │  📣 Julien | 🤝 Mike           │
+│  └────────┴──────┘│  └───────────┴───────────────┘  │  📊 Clair  | 📐 Ada            │
+│                   │                                 │  ☕ James  | 🐍 Guido          │
+│  • Project:       │  • Interactive multi-language   │  🖥️ Chuck                      │
+│    File & folder  │    notebook cells (.jsh, .sc,   │  ────────────────────────────  │
+│    tree of cwd    │    .kts, .py, .ipynb)           │  Conversation stream,          │
+│                   │                                 │  tool execution, and           │
+│  • Kernel:        │  • Syntax-highlighted Notepad   │  peer-to-peer delegation       │
+│    Live variables,│    for code, Markdown, SQL,     │  ────────────────────────────  │
+│    trained models,│    JSON, YAML, and CSV files    │  [Composer & Slash Commands]   │
+│    & Serve Engine │                                 │  [Model ▼] [Effort ▼] [Send]   │
+├───────────────────┴─────────────────────────────────┴────────────────────────────────┤
+│  Status Bar: [LSP (JDT / Ty) & MCP Status]                   [Heap Memory  |  CPU]   │
+└──────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+- **Left Pane — Explorer Tabs**:
+  - **Project Explorer**: Navigate your workspace directory tree. Double-click any notebook (`.ipynb`, `.jsh`, `.sc`, `.kts`, `.py`) or text file (`.md`, `.java`, `.csv`, `.json`, `.sql`) to open it in the center pane.
+  - **Kernel Explorer**: Inspect live in-memory variables from your active notebook, save trained `.sml` models, and launch or manage the built-in SMILE Serve inference service.
+- **Center Pane — Notebook & Editor Tabs**: Houses interactive polyglot notebooks and syntax-highlighted Notepad editors. Opens `Welcome` and `Release Notes` by default when starting fresh.
+- **Right Pane — AI Agent Team**: Dedicated tabs for each domain specialist agent, ordered along your end-to-end product and engineering workflow. Agents can collaborate and delegate tasks to one another (`@frank`, `@steve`, `@julien`, `@mike`, `@clair`, `@ada`, `@james`, `@guido`, `@chuck`), and tabs automatically badge or come to the front when an agent needs your input.
+- **Menu Bar & Toolbar**: Quick access to **File** (including **Settings…** for OS keychain-backed API keys and **Plugins…** for the plugin marketplace), **Cell**, **Find**, **Inference** (start/stop/restart Serve Engine, check health & metrics, open the Web UI), and **Help**.
+- **Status Bar**: Displays background language server (JDT LS, Ty) and MCP server status, active kernel activity, and real-time JVM heap and CPU utilization.
+
+---
+
+## 3. Interactive Polyglot Notebooks
+
+SMILE Studio natively supports four first-class execution environments:
+
+| Language | Extension | Execution Engine | Highlights |
+|----------|-----------|------------------|------------|
+| **Java** | `.jsh` | JShell (Java 25) | Fast JVM REPL, full SMILE library imports, SIMD vectorization |
+| **Scala** | `.sc` | Scala 3 REPL | Clean functional syntax, concise DSL for formulas and matrix math |
+| **Kotlin** | `.kts` | Kotlin Scripting Host | Idiomatic Kotlin data science bindings and extension functions |
+| **Python** | `.py`, `.ipynb` | IPython / Jupyter | Standard Jupyter interoperability, PyTorch, pandas, scikit-learn |
+
+### Running Cells & Shortcuts
+- `Shift + Enter`: Execute the focused cell and advance focus to the next cell.
+- `Ctrl + Enter` (or `Cmd + Enter` on macOS): Execute the focused cell in place without advancing.
+- `Tab`: Trigger context-aware AI code completion inside notebook editors.
+- **Cell Controls**: Each cell has a top toolbar with Run (`▶`), Run & Advance (`⏭`), Cell Type selector (Code / Markdown), Move Up (`↑`), Move Down (`↓`), Clear Output (`🧹`), and Delete (`⌦`).
+
+### Saving and Auto-Save
+- Save notebooks manually via `Ctrl+S` / `Cmd+S` or **File > Save**.
+- Toggle **File > Auto Save** to automatically save open files every 60 seconds.
+- External file modifications on disk are automatically detected and reloaded safely.
+
+---
+
+## 4. Machine Learning & Data Science with SMILE
+
+SMILE (Statistical Machine Intelligence and Learning Engine) provides state-of-the-art ML algorithms designed for high performance and clean API ergonomics:
+
+### In-Memory DataFrames & Formulas
+```java
+// Read CSV, ARFF, Parquet, JSON, Arrow, Avro, or SQL tables
+var iris = Read.arff(System.getProperty("smile.home") + "/data/weka/iris.arff");
+System.out.println(iris.structure());
+
+// Declarative modeling formula
+var formula = Formula.lhs("class");
+```
+
+### Classification & Regression
+```java
+// Train Random Forest classifier
+var model = RandomForest.fit(formula, iris);
+System.out.println(model.metrics());
+
+// Feature importance
+for (var imp : model.importance()) {
+    System.out.printf("%s: %.4f%n", imp.name(), imp.score());
+}
+```
+
+### High-Performance Visualization
+- **Swing Desktop Plots**: `ScatterPlot.of(...)`, `LinePlot.of(...)`, `BoxPlot.of(...)`, `Histogram.of(...)`. Call `show(plot.figure())` to open an interactive Swing plot window.
+- **Vega-Lite Browser Plots**: `BarPlot`, `Heatmap`, `DensityPlot`, `BubblePlot`, `SplomPlot`. Automatically rendered in your default browser.
+
+---
+
+## 5. Your AI Agent Team
+
+SMILE Studio embeds a team of nine specialized AI agents in the right panel, ordered along the natural lifecycle of building, shipping, and growing a product or data science solution:
+
+### 1. 👔 Frank the Chief of Staff (`@frank`)
+- Strategic partner and senior aide who prioritizes what deserves your attention, coordinates work across the agent team, synthesizes progress and risks, and holds execution to your stated goals.
+- Bring Frank a goal or a stream of updates to turn it into a clear next action or cross-agent briefing.
+
+### 2. 💡 Steve the Product Manager (`@steve`)
+- Drives product discovery and definition: opportunity mapping, problem validation, user interviews, JTBD analysis, competitor analysis, PRDs, feature prioritization, bet sizing, scope cutting, roadmaps, and launch plans.
+- Hands off validated requirements directly to `@ada` for architecture design.
+
+### 3. 📣 Julien the Evangelist (`@julien`)
+- Developer and product evangelist who builds your audience and drives organic, community-led growth: brand narrative, canonical positioning, searchable thought leadership, authentic social posts (LinkedIn and X), product launches, community programs, and referral loops.
+- Drafts in the open—nothing goes public without your approval—and passes high-intent community signals to `@mike`.
+
+### 4. 🤝 Mike the DealMaker (`@mike`)
+- Founder-led B2B sales operator: scans target accounts for buying signals (funding, hiring, leadership changes), builds ICP-matched prospect lists, qualifies leads, drafts signal-based outbound emails, manages your pipeline ledger with FIT+INTENT+TIMING scoring, and prepares meeting briefings.
+- No outbound message ever goes to a real person without your explicit approval first.
+
+### 5. 📊 Clair the Data Scientist (`@clair`)
+- State-of-the-art data science and AutoML partner: exploratory analysis, data cleaning (CSV, ARFF, JSON, Avro, Parquet, Iceberg, or SQL), feature engineering, ablation studies, iterative ensemble modeling, interactive visualization, and scientific posters or slide decks.
+- Place your data in `input/` and run `/automl` to generate an end-to-end pipeline and deployable model in `output/`.
+
+### 6. 📐 Ada the Architect (`@ada`)
+- Senior software architect for system design: feasibility and constraint analysis, domain decomposition, API and contract design, NFR and security patterns, Architecture Decision Records (ADRs), and work breakdown.
+- Full-stack and polyglot—Ada can implement her designs directly in production code or hand units off to `@james` and `@guido`.
+
+### 7. ☕ James the Java Guru (`@james`)
+- Modern Java 25 and JVM specialist: writing and refactoring code, building ML and visualization pipelines on SMILE, SOLID code reviews, concurrency (virtual threads, structured concurrency) and performance profiling, OWASP security audits, JUnit/AssertJ test suites, and JDK/Quarkus migrations.
+- Also powers inline AI code completion and snippet generation in Java notebooks.
+
+### 8. 🐍 Guido the Pythonista (`@guido`)
+- Python engineer for the scientific stack (NumPy, Pandas, Matplotlib, Seaborn, scikit-learn): writing strictly typed Python, packaging (`pyproject.toml`, `uv`, `ruff`, `mypy`, `pytest`), building CLIs (`Click`, `Typer`), property-based testing (`Hypothesis`), and profiling (`cProfile`, `PyInstrument`, `memray`).
+- Also powers inline AI code completion and snippet generation in Python notebooks.
+
+### 9. 🖥️ Chuck the Desktop Operator (`@chuck`)
+- Careful desktop automation operator that drives native GUI applications via screenshots, mouse, and keyboard when no CLI surface exists—navigating installers and dialogs, filling forms, opening system files/URLs, or automating browsers with Playwright.
+- Verifies every step with a screenshot, confirms before any hard-to-undo action, and never types secrets without your explicit consent.
+
+### Working with Agents
+- **Prompt Execution**: Press `Ctrl + Enter` (or `Cmd + Enter`) in the composer to send your prompt, or `Shift + Enter` to insert a line break.
+- **Peer-to-Peer Delegation**: Mention any teammate by handle (e.g., `@ada`, `@clair`, `@james`, `@julien`, `@mike`) or let `@frank` coordinate multi-agent workflows automatically.
+- **Slash Commands**: Type `/` (or press `Ctrl + Space` / `Cmd + Space` for hints) to invoke built-in and plugin skills:
+  - `/help`: List all available slash commands and agent skills.
+  - `/init`: Analyze the current workspace and initialize project context (`SMILE.md`).
+  - `/automl`: Trigger end-to-end automated machine learning workflows with `@clair`.
+  - `/resume`: Open the session picker to restore and continue a previous conversation.
+  - `/compact`: Summarize and compact conversation history to free up context window space.
+- **Shell Commands**: Prefix any prompt with `!` (e.g., `!git status` or `!ls -la`) to run shell commands directly in your workspace.
+- **Model Selection & Reasoning Effort**: Choose your preferred LLM provider/model and reasoning effort level (`Default`, `Low`, `Medium`, `High`) from the dropdown controls at the bottom of each agent tab. Configure API keys securely in your OS keychain via **File > Settings…**.
+
+---
+
+## 6. Document Editing with Notepad
+
+Double-clicking any non-notebook text file in the Project Explorer opens it in the built-in **Notepad**:
+- Full syntax highlighting for Markdown (`.md`), Java (`.java`), Python (`.py`), SQL (`.sql`), Scala (`.sc`), Kotlin (`.kt`), Shell (`.sh`), JSON, YAML, and CSV.
+- Integrated spell checker with English dictionary.
+- Code folding, occurrence marking, and fast Find & Replace (`Ctrl+F` / `Ctrl+H`).
+
+---
+
+## 7. Keyboard Shortcuts Reference
+
+| Shortcut (Win / Linux) | Shortcut (macOS) | Action |
+|------------------------|------------------|--------|
+| `Ctrl + N` | `Cmd + N` | New Notebook |
+| `Ctrl + O` | `Cmd + O` | Open File |
+| `Ctrl + S` | `Cmd + S` | Save Active File |
+| `Ctrl + Shift + S` | `Cmd + Shift + S` | Save As… |
+| `Ctrl + F` | `Cmd + F` | Find in Document |
+| `Ctrl + H` | `Cmd + H` | Replace in Document |
+| `Shift + Enter` | `Shift + Enter` | Run Cell and Advance |
+| `Ctrl + Enter` | `Cmd + Enter` | Run Cell in Place / Submit Agent Prompt |
+| `Tab` | `Tab` | AI Code Completion (Notebook) |
+| `Ctrl + Space` | `Cmd + Space` | Slash Command Hints (Agent CLI) |
+| `Ctrl + =` / `Ctrl + -` | `Cmd + =` / `Cmd + -` | Increase / Decrease Font Size |
+
+---
+
+## 8. Where to Learn More
+
+- Check out **Release Notes** in the adjacent tab for details on the latest features and improvements.
+- Visit the sample notebooks under `notebooks/` in your SMILE installation directory.
+- Explore the SMILE documentation and tutorials online at [https://haifengl.github.io/](https://haifengl.github.io/).
+- Use the **Help > JavaDocs** and **Help > Tutorials** menu options for instant access to API documentation.

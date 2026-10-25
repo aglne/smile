@@ -1,0 +1,295 @@
+####
+#
+# Copyright (c) 2010-2026 Haifeng Li. All rights reserved.
+#
+# SMILE Serve is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
+#
+# SMILE Serve is distributed in the hope that it will be useful, but
+# WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+# Affero General Public License for more details.
+#
+# You should have received a copy of the GNU Affero General Public
+# License along with SMILE Serve. If not, see
+# <https://www.gnu.org/licenses/>.
+####
+
+###
+# This Dockerfile builds a GPU-enabled container that runs the Quarkus
+# smile-serve application in JVM mode on NVIDIA CUDA.
+#
+# Base image: nvidia/cuda:13.2.0-*-ubuntu24.04 (Ubuntu 24.04 + CUDA 13.2)
+#
+# IMPORTANT: build context must be the repository root (not serve/). The image is built entirely in Docker: one
+# stage compiles the Quarkus JVM app with Gradle, another compiles the CUDA libsmile_torch.so, and no host-side
+# build step is required:
+#
+#   docker build -f serve/src/main/docker/Dockerfile.gpu \
+#     -t quarkus/smile-serve-gpu .
+#
+# The Quarkus profile defaults to `local` (embedded H2 database, no PostgreSQL). Override it with, e.g.,
+#   --build-arg QUARKUS_PROFILE=prod
+# (the prod profile needs a PostgreSQL database; see serve/README.md). Extra Gradle arguments go in
+#   --build-arg GRADLE_ARGS="..."
+#
+# Then run the container using (requires NVIDIA Container Toolkit).
+# For Qwen 27B BF16 on 2x 40GB GPUs:
+#   -Dsmile.chat.devices=0,7
+# Or consecutive devices from a base index:
+#   -Dsmile.chat.devices=0 -Dsmile.chat.tensor-parallel-size=2
+#
+# docker run -i --rm --gpus all -p 8888:8080 \
+#   -e JAVA_OPTS_APPEND="-Dsmile.chat.model=Qwen/Qwen3.8-27B -Dsmile.chat.devices=0,7 -Dsmile.chat.max-seq-len=8192 -XX:ErrorFile=/model/hs_err_pid%p.log" \
+#   -u root -v "$(pwd)/model":/model quarkus/smile-serve-gpu
+#
+# Optional JVM flags:
+# - JAVA_OPTS: replaces the default JVM options
+# - JAVA_OPTS_APPEND: appended to the default JVM options
+#
+# Remote debugging example:
+#
+# docker run -i --rm --gpus all -p 8888:8080 -p 5005:5005 \
+#   -e JAVA_OPTS_APPEND="-agentlib:jdwp=transport=dt_socket,server=y,suspend=n,address=*:5005" \
+#   -u root -v "$(pwd)/model":/model quarkus/smile-serve-gpu
+#
+###
+# Only used for its JDK 25 and package manager to build the Quarkus app; no GraalVM native build happens here.
+ARG MANDREL_BUILDER=quay.io/quarkus/ubi10-quarkus-mandrel-builder-image:jdk-25
+ARG CUDA_VERSION=13.2.0
+ARG TORCH_VERSION=2.14.1
+ARG CU_VERSION=132
+
+# -----------------------------------------------------------------------------
+# Stage 0: build the Quarkus JVM app (serve/build/quarkus-app) with the selected profile
+# -----------------------------------------------------------------------------
+FROM ${MANDREL_BUILDER} AS app-builder
+
+ARG NODE_VERSION=24.11.0
+ARG QUARKUS_PROFILE=local
+ARG GRADLE_ARGS=""
+
+USER root
+
+# Archive tools. Node.js is needed by Quinoa for the web UI.
+RUN microdnf install -y gzip tar xz findutils && microdnf clean all
+RUN curl -fsSL --retry 5 --retry-delay 10 "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.xz" \
+    | tar -xJ -C /usr/local --strip-components=1
+
+WORKDIR /src
+COPY . /src
+RUN (cd serve/src/main/webui && npm install)
+RUN ./gradlew :serve:build -x test -Dquarkus.profile=${QUARKUS_PROFILE} ${GRADLE_ARGS}
+
+# -----------------------------------------------------------------------------
+# Stage 1: build libsmile_torch against CUDA LibTorch (needs Toolkit headers)
+# -----------------------------------------------------------------------------
+FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu24.04 AS smile-torch-builder
+
+ARG TORCH_VERSION
+ARG CU_VERSION
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        cmake \
+        curl \
+        g++ \
+        make \
+        unzip \
+        libnccl2 \
+        libnccl-dev \
+        python3 \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /tmp
+RUN curl -fsSL --retry 5 --retry-delay 10 -o /tmp/libtorch.zip \
+        "https://download.pytorch.org/libtorch/cu${CU_VERSION}/libtorch-shared-with-deps-${TORCH_VERSION}%2Bcu${CU_VERSION}.zip" \
+    && unzip -q -o /tmp/libtorch.zip -d /usr/local \
+    && rm -f /tmp/libtorch.zip
+
+COPY deep/src/main/cpp /src/smile_torch
+WORKDIR /src/smile_torch
+# Minimum CUDA arch is sm_80 (A100); also sm_90 (H100) and sm_100 (Blackwell FP4).
+ENV TORCH_CUDA_ARCH_LIST="8.0 9.0 10.0"
+RUN test -d /src/smile_torch/third_party/flashinfer/include/flashinfer \
+    && cmake -S . -B /build/cpp \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DLIBTORCH_ROOT=/usr/local/libtorch \
+        -DTORCH_CUDA_ARCH_LIST="8.0;9.0;10.0" \
+        -DBUILD_TESTING=OFF \
+    && cmake --build /build/cpp --config Release --parallel "$(nproc)" \
+    && test -f /build/cpp/libsmile_torch.so \
+    && nm -D /build/cpp/libsmile_torch.so | grep -q smile_flashinfer_is_available \
+    && nm -D /build/cpp/libsmile_torch.so | grep -q smile_flashinfer_paged_attention \
+    && nm -D /build/cpp/libsmile_torch.so | grep -q smile_flashinfer_set_aot_dir \
+    && ! nm -u /build/cpp/libsmile_torch.so | grep -q smile_flashinfer_paged_attention_cuda \
+    && nm /build/cpp/libsmile_torch.so | grep -E ' [Tt] smile_flashinfer_paged_attention_cuda$'
+
+# Bundle flashinfer-jit-cache AOT modules (open attention kernels; not cubin).
+# Note: do not use shell heredocs in RUN — classic Dockerfile parsers end the
+# instruction at <<'PY' and then treat the following "&&" as an unknown opcode.
+ARG FLASHINFER_JIT_CACHE_VERSION=0.6.6
+# LibTorch may be cu132, but FlashInfer only publishes jit-cache through cu130
+# for v0.6.6 (cu128/cu129/cu130). Do not derive this from CU_VERSION.
+ARG FLASHINFER_JIT_CACHE_CU=cu130
+RUN mkdir -p /opt/flashinfer/aot \
+    && (curl -fsSL --retry 5 --retry-delay 10 -o /tmp/fi_jit.whl \
+        "https://github.com/flashinfer-ai/flashinfer/releases/download/v${FLASHINFER_JIT_CACHE_VERSION}/flashinfer_jit_cache-${FLASHINFER_JIT_CACHE_VERSION}%2B${FLASHINFER_JIT_CACHE_CU}-cp39-abi3-manylinux_2_28_x86_64.whl" \
+        || curl -fsSL --retry 5 --retry-delay 10 -o /tmp/fi_jit.whl \
+        "https://flashinfer.ai/whl/${FLASHINFER_JIT_CACHE_CU}/flashinfer_jit_cache-${FLASHINFER_JIT_CACHE_VERSION}%2B${FLASHINFER_JIT_CACHE_CU}-cp39-abi3-manylinux_2_28_x86_64.whl") \
+    && printf '%s\n' \
+        'import zipfile, pathlib, sys' \
+        'root = pathlib.Path("/opt/flashinfer/aot")' \
+        'root.mkdir(parents=True, exist_ok=True)' \
+        'count = 0' \
+        'with zipfile.ZipFile("/tmp/fi_jit.whl") as z:' \
+        '    for name in z.namelist():' \
+        '        if not name.endswith(".so"):' \
+        '            continue' \
+        '        parts = name.strip("/").split("/")' \
+        '        if len(parts) >= 2:' \
+        '            dest = root / parts[-2] / parts[-1]' \
+        '        else:' \
+        '            dest = root / parts[-1]' \
+        '        dest.parent.mkdir(parents=True, exist_ok=True)' \
+        '        dest.write_bytes(z.read(name))' \
+        '        count += 1' \
+        'print(f"extracted {count} AOT .so modules", file=sys.stderr)' \
+        'if count < 1:' \
+        '    raise SystemExit("no .so in flashinfer-jit-cache wheel")' \
+        > /tmp/extract_fi_aot.py \
+    && python3 /tmp/extract_fi_aot.py \
+    && rm -f /tmp/fi_jit.whl /tmp/extract_fi_aot.py \
+    && find /opt/flashinfer/aot -name '*.so' | head -5
+
+# -----------------------------------------------------------------------------
+# Stage 2: fetch the onnxruntime-genai shared library from its pip wheel.
+# Python/pip stay in this stage; only the extracted libraries are copied on.
+# GENAI_VERSION is the onnxruntime-genai-cuda release (empty = latest); it must
+# be built against an ONNX Runtime ABI compatible with ORT_VERSION below, so pin
+# it once a combination has been validated.
+# -----------------------------------------------------------------------------
+FROM nvidia/cuda:${CUDA_VERSION}-runtime-ubuntu24.04 AS genai-builder
+
+ARG GENAI_VERSION=
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        python3 \
+        python3-pip \
+    && rm -rf /var/lib/apt/lists/*
+
+# --no-deps: ONNX Runtime itself comes from the runtime stage, not from the
+# onnxruntime-gpu wheel dependency.
+RUN python3 -m pip install --no-cache-dir --break-system-packages --no-deps \
+        --target /opt/genai-wheel \
+        "onnxruntime-genai-cuda${GENAI_VERSION:+==${GENAI_VERSION}}" \
+    && mkdir -p /opt/onnxruntime-genai/lib \
+    && find /opt/genai-wheel/onnxruntime_genai -maxdepth 1 -name '*.so*' \
+        -exec cp -a {} /opt/onnxruntime-genai/lib/ \; \
+    && test -f /opt/onnxruntime-genai/lib/libonnxruntime-genai.so \
+    && ls -l /opt/onnxruntime-genai/lib
+
+# -----------------------------------------------------------------------------
+# Stage 3: runtime image
+# -----------------------------------------------------------------------------
+FROM nvidia/cuda:${CUDA_VERSION}-runtime-ubuntu24.04
+
+LABEL org.opencontainers.image.title="SMILE Serve (GPU)" \
+      org.opencontainers.image.licenses="AGPL-3.0-or-later OR LicenseRef-SMILE-Commercial" \
+      org.opencontainers.image.source="https://github.com/haifengl/smile" \
+      org.opencontainers.image.url="https://www.aihalo.dev/licensing.html"
+
+ARG TORCH_VERSION
+ARG CU_VERSION
+ARG ORT_VERSION=1.30.0
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    LANG=C.UTF-8 \
+    LANGUAGE=en_US:en \
+    LC_ALL=C.UTF-8
+
+# OpenJDK 25, native BLAS, and tools to unpack LibTorch / ONNX Runtime. ARPACK is deliberately absent:
+# only fit-time code (smile.manifold, SpectralClustering) uses it, never inference.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+        gzip \
+        libgomp1 \
+        libopenblas0-pthread \
+        libnccl2 \
+        libnccl-dev \
+        libcusparselt0 \
+        libcudnn9-cuda-13 \
+        libnvshmem3-cuda-13 \
+        cuda-cupti-13-2 \
+        openjdk-25-jre-headless \
+        tar \
+        unzip \
+    && rm -rf /var/lib/apt/lists/*
+
+# The app dlopens libopenblas.so (smile.lib.blas / smile.lib.lapack default), but Ubuntu's libopenblas0-pthread ships
+# only the versioned libopenblas.so.0, so BLAS-backed models (LDA, ...) fail with "Cannot open library: libopenblas.so".
+RUN ln -s libopenblas.so.0 /usr/lib/x86_64-linux-gnu/libopenblas.so && ldconfig
+
+ENV JAVA_HOME=/usr/lib/jvm/java-25-openjdk-amd64
+ENV PATH="${JAVA_HOME}/bin:${PATH}"
+
+# Non-root user (UID 185 matches Quarkus UBI convention / COPY --chown below)
+RUN groupadd --system --gid 185 smile \
+    && useradd --system --uid 185 --gid 185 --home-dir /deployments --shell /sbin/nologin smile
+
+# Install ONNX Runtime
+RUN curl -fsSL "https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/onnxruntime-linux-x64-${ORT_VERSION}.tgz" \
+    | tar -zx -C /usr/local/ \
+    && mv /usr/local/onnxruntime-linux-x64-${ORT_VERSION} /usr/local/onnxruntime
+
+# Install LibTorch (CUDA build — matches this base image / smile_torch stage)
+RUN curl -fsSL --retry 5 --retry-delay 10 -o /tmp/libtorch.zip \
+        "https://download.pytorch.org/libtorch/cu${CU_VERSION}/libtorch-shared-with-deps-${TORCH_VERSION}%2Bcu${CU_VERSION}.zip" \
+    && unzip -q -o /tmp/libtorch.zip -d /usr/local \
+    && rm -f /tmp/libtorch.zip
+
+# ONNX Runtime GenAI (libonnxruntime-genai.so, from the stage-2 pip wheel)
+COPY --from=genai-builder /opt/onnxruntime-genai/lib /usr/local/onnxruntime-genai/lib
+ENV ONNXRUNTIME_NATIVE_PATH="/usr/local/onnxruntime/lib" \
+    ONNXRUNTIME_GENAI_NATIVE_PATH="/usr/local/onnxruntime-genai/lib"
+
+# CUDA image already sets CUDA library paths; append ORT + GenAI + LibTorch
+ENV LD_LIBRARY_PATH="/usr/local/onnxruntime/lib:/usr/local/onnxruntime-genai/lib:/usr/local/libtorch/lib:/usr/lib/x86_64-linux-gnu/nvshmem/13${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+
+# We make four distinct layers so if there are application changes the library layers can be re-used
+COPY --from=app-builder --chown=185:185 /src/serve/build/quarkus-app/lib/ /deployments/lib/
+COPY --from=app-builder --chown=185:185 /src/serve/build/quarkus-app/*.jar /deployments/
+COPY --from=app-builder --chown=185:185 /src/serve/build/quarkus-app/app/ /deployments/app/
+COPY --from=app-builder --chown=185:185 /src/serve/build/quarkus-app/quarkus/ /deployments/quarkus/
+
+# The CUDA-enabled libsmile_torch.so and FlashInfer AOT kernels from stage 1
+COPY --from=smile-torch-builder --chown=185:185 /build/cpp/libsmile_torch.so /deployments/lib/libsmile_torch.so
+COPY --from=smile-torch-builder --chown=185:185 /opt/flashinfer/aot /opt/flashinfer/aot
+
+ENV LD_LIBRARY_PATH="/deployments/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+ENV FLASHINFER_AOT_DIR="/opt/flashinfer/aot"
+ENV SMILE_FLASHINFER_AOT_DIR="/opt/flashinfer/aot"
+
+# Minimal launcher (Ubuntu base has no UBI run-java.sh)
+RUN printf '%s\n' \
+    '#!/bin/bash' \
+    'set -euo pipefail' \
+    'exec java ${JAVA_OPTS:-} ${JAVA_OPTS_APPEND:-} -jar "${JAVA_APP_JAR}"' \
+    > /deployments/run-java.sh \
+    && chmod 0755 /deployments/run-java.sh \
+    && chown 185:185 /deployments/run-java.sh
+
+EXPOSE 8080
+USER 185
+
+ENV HF_HOME="/model/huggingface"
+ENV JAVA_APP_JAR="/deployments/quarkus-run.jar"
+ENV JAVA_OPTS_APPEND="${JAVA_OPTS_APPEND} -Djava.util.logging.manager=org.jboss.logmanager.LogManager --add-opens java.base/java.lang=ALL-UNNAMED --add-opens java.base/java.nio=ALL-UNNAMED --enable-native-access=ALL-UNNAMED"
+
+ENTRYPOINT [ "/deployments/run-java.sh" ]

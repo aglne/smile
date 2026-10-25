@@ -1,0 +1,76 @@
+plugins {
+    // Apply the common convention plugin for shared build configuration between library and application projects.
+    id("buildlogic.common-conventions")
+    // Apply the java Plugin to add support for Java.
+    java
+}
+
+dependencies {
+    implementation("org.slf4j:slf4j-api:2.0.20")
+
+    // Use JUnit Jupiter for testing.
+    testImplementation("org.junit.jupiter:junit-jupiter:6.1.3")
+    testRuntimeOnly("org.junit.platform:junit-platform-launcher")
+    testRuntimeOnly("org.slf4j:slf4j-simple:2.0.20")
+}
+
+// Apply a specific Java toolchain to ease working on different environments.
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(25)
+    }
+    withJavadocJar()
+    withSourcesJar()
+}
+
+tasks.javadoc {
+    if (JavaVersion.current().isJava9Compatible) {
+        (options as StandardJavadocDocletOptions).addBooleanOption("html5", true)
+    }
+}
+
+tasks.withType<JavaCompile> {
+    // Set the source and target compatibility to Java 25
+    sourceCompatibility = JavaVersion.VERSION_25.toString()
+    targetCompatibility = JavaVersion.VERSION_25.toString()
+
+    options.encoding = "UTF-8"
+    options.compilerArgs.add("-g:lines,vars,source")
+    options.compilerArgs.add("-Xlint:deprecation")
+    options.compilerArgs.add("-Xlint:unchecked")
+}
+
+tasks.named<Test>("test") {
+    // Use JUnit Platform for unit tests.
+    useJUnitPlatform {
+        // Allow callers to skip tagged groups, e.g.:
+        //   ./gradlew :deep:test -DexcludeTags=integration,cuda
+        val excludeTagsProp = System.getProperty("excludeTags")
+        if (!excludeTagsProp.isNullOrBlank()) {
+            excludeTags(*excludeTagsProp.split(",").map(String::trim).toTypedArray())
+        }
+        // Allow callers to run only tagged groups, e.g. in the GPU test container
+        // (bin/gpu-test-and-build.sh) to positively confirm every @Tag("cuda") test
+        // actually ran rather than silently assumeTrue-skipping:
+        //   ./gradlew :deep:test -DincludeTags=cuda
+        val includeTagsProp = System.getProperty("includeTags")
+        if (!includeTagsProp.isNullOrBlank()) {
+            includeTags(*includeTagsProp.split(",").map(String::trim).toTypedArray())
+        }
+    }
+    workingDir = project.rootDir
+    // Forward any smile.test.* Gradle project properties (-P) to the test JVM
+    // as system properties (-D), so that gated tests can be enabled with e.g.:
+    //   ./gradlew :base:test -Psmile.test.network=true
+    val testNetwork = providers.gradleProperty("smile.test.network")
+    if (testNetwork.isPresent) {
+        systemProperty("smile.test.network", testNetwork.get())
+    }
+    val linalgBackend = providers.systemProperty("smile.linalg.backend")
+        .orElse(providers.gradleProperty("smile.linalg.backend"))
+        .orElse(providers.gradleProperty("linalgBackend"))
+        .orElse(providers.environmentVariable("SMILE_LINALG_BACKEND"))
+    if (linalgBackend.isPresent) {
+        systemProperty("smile.linalg.backend", linalgBackend.get())
+    }
+}

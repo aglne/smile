@@ -1,0 +1,689 @@
+# SMILE — Large Language Models (`smile.llm`)
+
+The `smile.llm` package provides the building blocks and complete inference
+stacks for decoder-only LLMs on top of the same FFM-backed LibTorch bridge used
+by `smile.deep`. It ships a LLaMA-3 implementation, a Qwen3.5 hybrid
+(Gated DeltaNet + gated full attention) implementation, a tiktoken BPE
+tokenizer, a continuous-batching inference engine, KV-cache / radix prefix
+reuse, weight quantization, and tensor parallelism.
+
+For the shared tensor / layer / optimizer API, see [README.md](README.md).
+For ONNX-based generative models, see [ONNX_GENAI.md](ONNX_GENAI.md).
+
+---
+
+## Table of Contents
+
+1. [Prerequisites](#prerequisites)
+2. [Package Map](#package-map)
+3. [Core Types](#core-types)
+4. [Tokenizer (`smile.llm.tokenizer`)](#tokenizer-smilellmtokenizer)
+5. [Positional Encodings](#positional-encodings)
+6. [Transformer Primitives](#transformer-primitives)
+7. [LLaMA (`smile.llm.model.llama`)](#llama-smilellmmodelllama)
+8. [Qwen3.5 (`smile.llm.model.qwen`)](#qwen35-smilellmmodellqwen)
+9. [MiniMax-M3 (`smile.llm.model.minimax`)](#minimax-m3-smilellmmodelminimax)
+10. [Inference Engine (`smile.llm.engine`)](#inference-engine-smilellmengine)
+11. [KV Cache & Radix Prefix Reuse (`smile.llm.cache`)](#kv-cache--radix-prefix-reuse-smilellmcache)
+12. [Attention Backends (`smile.llm.attention`)](#attention-backends-smilellmattention)
+13. [Quantization (`smile.llm.quant`)](#quantization-smilellmquant)
+14. [Tensor Parallelism (`smile.llm.parallel`)](#tensor-parallelism-smilellmparallel)
+15. [Tool Calling & Chat Templates](#tool-calling--chat-templates)
+
+---
+
+## Prerequisites
+
+`smile.llm` runs on the same native stack as `smile.deep`: the `smile_torch`
+shared library and its LibTorch dependencies must be discoverable by the
+platform loader, and FFM access must be enabled
+(`--enable-native-access=ALL-UNNAMED`). See
+[Prerequisites & Dependencies](README.md#prerequisites--dependencies) in the
+module README for the per-platform details.
+
+GPU inference additionally requires the CUDA-enabled LibTorch libraries. On
+Ampere or newer hardware the model loads in BFloat16; on older GPUs Float16 is
+used. CPU inference runs in Float32.
+
+---
+
+## Package Map
+
+```
+smile.llm
+├── Role, Message, ContentPart, TextPart, ImageUrlPart, VideoUrlPart, AudioUrlPart
+├── ChatCompletion, FinishReason, ChatOptions, ToolChoice
+├── ToolDefinition, FunctionDefinition, ToolCall, FunctionCall
+├── LanguageModel.java     Common façade for chat-capable decoder LLMs
+├── GenerationListener.java, GenerationListeners.java
+├── tokenizer/     Tokenizer interface + Tiktoken (BPE) implementation
+├── transformer/   Shared primitives: Attention, FeedForward,
+│                  PositionalEncoding, RotaryPositionalEncoding
+├── model/llama/   LLaMA-3: Llama, LlamaModel, LlamaBlock,
+│                  GroupedQueryAttention, LlamaModelArgs, Tokenizer
+├── model/qwen/    Qwen3.5 hybrid text stack + vision tower
+├── engine/        Continuous-batching runtime: InferenceEngine, ModelExecutor,
+│                  GenerationRequest, GenerationHandle, speculative decoding
+├── cache/         KvCachePool, RadixCache, KV layout / metadata
+├── attention/     Attention backend selection (torch-native / FlashInfer)
+├── quant/         FP8 / NVFP4 / Marlin weight quantization
+├── parallel/      Tensor-parallel primitives
+├── checkpoint/    SafeTensors loader tuning
+├── template/      ChatTemplate interface + Qwen3 template
+└── tool/          Tool-call parsers (JSON, Qwen3 XML)
+```
+
+---
+
+## Core Types
+
+| Type | Kind | Purpose |
+|---|---|---|
+| `Role` | `enum` | `system`, `user`, `assistant`, `tool` |
+| `Message` | `record` | A dialog turn — role + ordered `ContentPart`s, plus optional tool fields |
+| `ContentPart` | sealed interface | `TextPart`, `ImageUrlPart`, `VideoUrlPart`, `AudioUrlPart` |
+| `FinishReason` | `enum` | `stop`, `length`, `tool_calls` |
+| `ChatCompletion` | `record` | Inference result — text, token arrays, log-probs, finish reason, tool calls |
+| `ChatOptions` | `record` | Per-request tool-calling options (`tools`, `toolChoice`, `parallelToolCalls`) |
+| `LanguageModel` | interface | Common façade: `encodeChat`, `generate`, `chat` |
+
+```java
+// Build a simple conversation
+Message[] dialog = {
+    Message.system("You are a helpful assistant."),
+    Message.user("What is the capital of France?")
+};
+
+// Inspect a completion
+ChatCompletion reply = llama.chat(dialog, 256, 0.6, 0.9, false, 0L, null);
+System.out.println(reply.content());   // "The capital of France is Paris."
+System.out.println(reply.reason());    // FinishReason.stop
+```
+
+`Message` also carries multimodal parts and tool fields:
+
+```java
+// Multimodal turn: text interleaved with an image
+Message turn = new Message(Role.user, List.of(
+        new TextPart("What is in this picture?"),
+        new ImageUrlPart("https://example.com/cat.jpg")));
+
+// Assistant turn that requested a tool, and the tool result that answers it
+Message call   = new Message(Role.assistant, List.of(), List.of(toolCall), null, null);
+Message result = new Message(Role.tool, "{\"temp\": 21}", null, toolCall.id(), null);
+```
+
+`LanguageModel` is the single-prompt façade. Concurrent multi-request
+scheduling belongs in `InferenceEngine`, not on this interface.
+
+```java
+public interface LanguageModel {
+    String family();                       // e.g. "meta/llama3", "alibaba/qwen3.5"
+    String name();
+    int maxSeqLen();
+    int[] encodeChat(Message... dialog);
+    ChatCompletion generate(int[] prompt, int maxGenLen, double temperature,
+                            double topp, boolean logprobs, long seed,
+                            GenerationListener listener, BooleanSupplier cancelRequested);
+    ChatCompletion chat(Message[] dialog, int maxGenLen, double temperature,
+                        double topp, boolean logprobs, long seed,
+                        GenerationListener listener, BooleanSupplier cancelRequested);
+}
+```
+
+Passing a non-null `cancelRequested` supplier enables cooperative cancel: the
+implementation checks it between decode steps and throws
+`CancellationException` when it returns `true` (KV is still unbound in
+`finally`).
+
+---
+
+## Tokenizer (`smile.llm.tokenizer`)
+
+`Tokenizer` is the encoding/decoding interface. `Tiktoken` is the BPE
+implementation compatible with OpenAI's tiktoken library (used by LLaMA-3):
+
+```java
+import smile.llm.tokenizer.Tiktoken;
+
+Tiktoken tok = new Tiktoken(
+        pattern,           // regex splitting pattern
+        specialTokens,     // map of special-token string → rank
+        ranks,             // merged BPE vocabulary (bytes → rank)
+        bosId, eosId       // BOS / EOS token IDs
+);
+
+// Encode with BOS+EOS
+int[] ids = tok.encode("Hello, world!", true, true);
+
+// Decode back to text
+String text = tok.decode(ids);
+
+// Vocabulary size
+int vocab = tok.size();
+```
+
+`Tiktoken` handles:
+
+- BPE merge table look-ups for regular tokens
+- Special token injection with a separate regex guard
+- UTF-8-safe decoding (with a strict `tryDecode` variant that throws
+  `CharacterCodingException` on invalid byte sequences)
+
+`HuggingFaceBpeVocab` loads a HuggingFace `tokenizer.json` vocabulary into the
+same representation.
+
+---
+
+## Positional Encodings
+
+Two implementations are provided:
+
+| Class | Algorithm | Used by |
+|---|---|---|
+| `PositionalEncoding` | Sinusoidal (sin/cos, fixed) | Original Transformer |
+| `RotaryPositionalEncoding` | RoPE (complex-number rotation) | LLaMA |
+
+```java
+// Sinusoidal — precomputes a [maxLen × dim] table once
+PositionalEncoding pe = new PositionalEncoding(512, 2048);
+Tensor out = pe.forward(embeddingTensor);   // adds positional signal
+
+// RoPE — called inside Attention.forward()
+RotaryPositionalEncoding rope = new RotaryPositionalEncoding(headDim, maxSeqLen);
+```
+
+Qwen3.5 uses a partial / interleaved multi-axis RoPE (`InterleavedMRope`,
+`PartialRotaryEncoding`) for its multimodal positions.
+
+---
+
+## Transformer Primitives
+
+`smile.llm.transformer` holds the shared building blocks reused by both model
+families:
+
+| Class | Role |
+|---|---|
+| `Attention` | Scalar-dot-product attention over the selected backend |
+| `FeedForward` | SwiGLU-style MLP block |
+| `PositionalEncoding` | Sinusoidal encoding |
+| `RotaryPositionalEncoding` | RoPE |
+
+---
+
+## LLaMA (`smile.llm.model.llama`)
+
+A full LLaMA-3 inference implementation:
+
+| Class | Role |
+|---|---|
+| `LlamaModelArgs` | Hyperparameter record; loaded from `params.json` / HF `config.json` |
+| `LlamaModel` | Top-level module — embedding + N × `LlamaBlock` + output projection |
+| `LlamaBlock` | Single decoder block: `GroupedQueryAttention` + `FeedForward` + RMS norms |
+| `GroupedQueryAttention` | Grouped-query attention with KV-cache and RoPE |
+| `Tokenizer` (llama) | Thin wrapper around `smile.llm.tokenizer.Tokenizer` |
+| `Llama` | High-level entry point — `build()`, single-prompt `generate()` / `chat()` |
+
+**Loading a checkpoint:**
+
+```java
+import smile.llm.model.llama.Llama;
+
+// Loads params.json + *.pt checkpoint(s) from the directory
+Llama llama = Llama.build(
+        "model/Meta-Llama-3-8B-Instruct",  // checkpoint dir
+        "model/Meta-Llama-3-8B-Instruct/tokenizer.model",
+        /*maxBatchSize=*/ 4,
+        /*maxSeqLen=*/    2048,
+        /*deviceId=*/     (byte) 0           // CUDA:0; use -1 for CPU
+);
+```
+
+`Llama.build` supports two on-disk layouts: **Meta** (`params.json` plus
+`consolidated.*.pt` shards) and **HuggingFace** (`config.json` plus
+`*.safetensors`, optionally indexed by `model.safetensors.index.json`). An
+overload accepts `memFractionStatic` (SGLang-style static-region fraction of
+total GPU memory for weights + KV) and a KV-cache dtype override.
+
+**Text generation (raw token IDs):**
+
+```java
+int[] prompt = llama.tokenizer.encode("Once upon a time", true, false);
+ChatCompletion result = llama.generate(
+        prompt,
+        /*maxGenLen=*/   200,
+        /*temperature=*/ 0.6,
+        /*topp=*/        0.9,
+        /*logprobs=*/    false,
+        /*seed=*/        42L,
+        /*listener=*/    null
+);
+System.out.println(result.content());
+```
+
+**Chat completion (dialog format):**
+
+```java
+import smile.llm.Message;
+
+ChatCompletion reply = llama.chat(
+        new Message[]{
+            Message.system("Be concise."),
+            Message.user("Explain RoPE in one sentence.")
+        },
+        /*maxGenLen=*/   128,
+        /*temperature=*/ 0.7,
+        /*topp=*/        0.9,
+        /*logprobs=*/    false,
+        /*seed=*/        0L,
+        /*listener=*/    null
+);
+System.out.println(reply.content());
+```
+
+**Streaming** via `GenerationListener` (serve uses
+`GenerationListeners.toPublisher`):
+
+```java
+import smile.llm.GenerationListener;
+
+GenerationListener listener = new GenerationListener() {
+    @Override public void onText(String chunk) { System.out.print(chunk); }
+};
+int[] prompt = llama.tokenizer.encode("Tell me a joke", true, false);
+llama.generate(prompt, 200, 0.8, 0.95, false, 0L, listener);
+```
+
+---
+
+## Qwen3.5 (`smile.llm.model.qwen`)
+
+`Qwen` implements the Qwen3.5 hybrid text stack: a mix of efficient linear
+attention (`GatedDeltaNet`) for most layers and full gated attention for the
+rest, with optional sparse MoE, a unified thinking / non-thinking mode, and a
+native vision tower for multimodal input.
+
+| Class | Role |
+|---|---|
+| `QwenModelArgs` | Hyperparameters from `config.json` |
+| `QwenModel` | Top-level decoder module |
+| `QwenBlock` | Decoder block (Gated DeltaNet or gated attention + MLP) |
+| `GatedDeltaNet` / `GatedDeltaRule` | Linear-attention core |
+| `GatedAttention` | Full gated attention layer |
+| `QwenMtp` | Multi-token-prediction head (speculative decoding) |
+| `QwenVisionTower` / `QwenVisionArgs` | Vision encoder for multimodal input |
+| `QwenVlProcessor` | Image / video preprocessing → `ProcessedMultimodal` |
+| `Qwen` | High-level entry point — `build()`, `generate()`, `chat()` |
+
+**Loading a checkpoint:**
+
+```java
+import smile.llm.model.qwen.Qwen;
+
+Qwen qwen = Qwen.build(
+        "model/Qwen3.5-8B",   // HF checkpoint dir (config.json + weights)
+        /*maxBatchSize=*/ 4,
+        /*maxSeqLen=*/    4096,   // <= 0 uses the config value
+        /*deviceId=*/     (byte) 0
+);
+```
+
+Overloads add `memFractionStatic`, a KV-cache dtype override, KV page size,
+`ParallelConfig` (tensor parallelism), and safetensors loader thread count.
+
+**Generation and chat** use the same `LanguageModel` surface as LLaMA, plus a
+text-prompt convenience:
+
+```java
+ChatCompletion out = qwen.complete("Write a haiku about the sea.", 64, 0.7, 0.9, false, 0L, null);
+ChatCompletion reply = qwen.chat(dialog, 256, 0.7, 0.9, false, 0L, null);
+```
+
+**Speculative decoding** is enabled by default when MTP weights are present:
+
+```java
+qwen.setSpeculativeEnabled(true);   // native MTP draft/verify
+```
+
+**Prefix replay** for hybrid models must be opted into explicitly (off by
+default for hybrid safety):
+
+```java
+qwen.setPrefixReplayEnabled(true);  // radix prefix reuse + DeltaNet state restore
+```
+
+### Qwen chat prompt
+
+`Qwen3ChatTemplate` renders prompts exactly like the checkpoint's `chat_template.jinja` (goldens: 41 dialogs x the Qwen3.5-0.8B,
+Qwen3.5-27B and Qwen3.8 templates rendered by transformers, `Qwen3ChatTemplateGoldenTest`; token ids of the rendered prompts
+equal the HF tokenizer's, `QwenTokenizerRealTest`). `Tokenizer.of(dir)` reads the checkpoint's template and
+`Qwen3ChatTemplate.Variant.detect` derives which behaviours apply, so each generation renders like its own reference:
+Qwen3.8 adds the reasoning-effort system turn and keeps think blocks of earlier turns (`preserve_thinking`), Qwen3.5
+splits `<think>` out of assistant content and prints an empty system turn, small Qwen3.5 models think only when asked.
+The same template serves plain chat, tool calls and the vision prompt; all added tokens (`<|im_start|>`, `<think>`,
+`<tool_call>`, the vision placeholders, ...) stay single tokens inside text (the tool path used to encode them as plain
+characters).
+
+Request fields (also accepted inside `chat_template_kwargs`): `thinking` / `thinking_mode` (`enabled|disabled|adaptive`) or
+`enable_thinking` (boolean) switch thinking off (`<think>\n\n</think>\n\n` is prefilled, the model answers directly),
+`reasoning_effort` (`xhigh` = default, `high` as an alias, `medium` = no instructions, `low`; others are HTTP 400) and
+`preserve_thinking`. The generation prompt opens `<think>\n`, so replies carry only the closing `</think>`; the endpoint
+returns the text after the last `</think>` (streaming chunks still carry the reasoning followed by `</think>`). Qwen3.8's
+default system turn adds ~44 prompt tokens per request (a shared prefix). `reasoning_content` in assistant history messages
+is not read (clients that echo it back are rendered with an empty think block).
+
+### Qwen3.x block-FP8 on Ampere (Marlin)
+
+Fine-grained FP8 checkpoints (`weight_block_size=[128,128]`, float32 `weight_scale_inv`, e.g. `Qwen/Qwen3.8-27B-FP8`) use
+native `_scaled_mm_v2` on Hopper and the same weight-only Marlin kernel as MiniMax on Ampere/Ada
+(`WeightGemmBackend.MARLIN_FP8`, chosen by `auto` for FP8 on sm_80-89; override name `marlin_fp8`).
+`Fp8BlockMarlinLinear` repacks the FP8 weights once (`smile_marlin_fp8_repack_weight`) and the 128x128 scales into the
+kernel's group-128 layout (`smile_marlin_fp8_repack_block_scales`: expanded over the 128 columns, bf16, Marlin permutation,
+FP8 exponent bias 2^120 folded in), so weights stay 1 byte per element in memory. Because the model constructor would
+otherwise allocate every projection as a bf16 shell (38.9 GB for the 27B model), the projections the installer replaces are
+constructed as 1x1 placeholders (`ParameterInit.placeholderGemms()`, `LinearLayer.gemm`). The FP8 installer also covers the
+MTP head (`mtp.layers.N.*`). Verified on an A100-40GB against vLLM's Marlin FP8 on the same checkpoint: teacher-forced
+log-probabilities over 8 prompts x 48 steps differ by 0.0037 on average (top-1 agreement 380/384; every disagreement is a
+tie in vLLM's own distribution); kernel tests cover every Qwen3.8-27B layer shape. Measured on one A100-40GB (batch 1):
+~36 tok/s plain and ~78-80 tok/s with MTP speculation (11 prompts x 256 tokens); the first eager build was ~22 / ~49. See
+"Qwen decode performance" below. Decode CUDA graphs need FlashInfer attention (the default backend; `libsmile_torch` must be
+built with `USE_FLASHINFER`, which is the CMake default) and are on by default; `SMILE_DECODE_CUDA_GRAPH=0` disables them.
+
+### Qwen decode performance (batch 1, FlashInfer + CUDA graphs)
+
+A plain decode step is ~27 ms of GPU time: Marlin GEMMs 20.9 ms and the lm_head GEMM 1.7 ms (both at the memory-bandwidth
+floor, ~1.3 TB/s) plus ~5 ms of everything else, in ~1500 graph nodes. The kernels that bring the rest down (all in
+`libsmile_torch`; each has a CUDA test against an independent reference, and an env switch back to the old path):
+
+| Kernel | Replaces | Where |
+|---|---|---|
+| `gated_delta_recurrent_fast_kernel` | one block per head with the whole state in shared memory: state in registers, grid over `V/32` x `B*H`, one cross-warp reduction per token (122 -> 10 us per layer call); `SMILE_GATED_DELTA_REFERENCE=1` selects the old kernel | `smile_gated_delta.cu` |
+| `smile_gated_delta_decode_fused` | DeltaNet decode conv update + q/k/v split + gate math + recurrent rule (~25 launches -> 2); `SMILE_GATED_DELTA_UNFUSED=1` disables it | `GatedDeltaNet.forward`, `Native.gatedDeltaDecodeFused` |
+| `smile_gated_delta_verify_window_fused` | the same for MTP verify windows, including the per-position conv and recurrent checkpoints | `GatedDeltaNet.fusedVerifyWindowGates` |
+| `smile_gemv2` | the two tiny `in_proj_a` / `in_proj_b` cuBLAS GEMVs (decode only: in verify it changes greedy trajectories for no gain) | `GatedDeltaNet.projectAB` |
+| `smile_add_gemma_rms_norm`, vectorized `smile_gemma_rms_norm`, `smile_silu_mul` | residual add + RMSNorm, SiLU * up | `QwenBlock`, `FeedForward` |
+| `smile_qk_norm_rope` (strided heads), `smile_sigmoid_gate_mul`, `smile_kv_write` | q/k norm + RoPE reading q in place from the interleaved q|gate projection, `attn * sigmoid(gate)`, the K and V cache writes (decode and verify paths of the 16 attention layers) | `GatedAttention`, `KvCachePool.put` |
+| persistent Marlin workspace | a `zeros` fill per GEMM (the kernel leaves its lock array zeroed) | `smile_marlin_fp8.cu` |
+
+`SMILE_FUSED_OPS=0` turns off all the elementwise kernels at once. Two implementation rules that cost time: a graph
+captured once reads the addresses it was captured with, so anything a replayed kernel reads (FlashInfer page tables) lives
+in fixed-address buffers refreshed before each replay (`KvCachePool.decodeGraphMetadata`); and a `Tensor` cached from
+inside a layer's forward must call `detachFromScopes()`, or the layer's `AutoScope` frees it after the first step.
+Comparing configurations needs 10+ prompts: 1-ulp changes flip greedy tokens and the MTP accept rate moves with the
+generated text. MTP rounds at 3 drafts: draft 8.2 ms (5.2 ms of it the 248k-vocabulary lm_head), verify 28.1 ms.
+
+---
+
+## MiniMax-M3 (`smile.llm.model.minimax`)
+
+MiniMax-M3 is a 428B-parameter (23B active) multimodal MoE language model. The text tower has GQA
+attention (64 query / 4 KV heads, Gemma-style RMSNorm, per-head QK norm, partial RoPE), 3 dense and
+57 sparse-MoE layers (128 routed experts, top-4, sigmoid routing with a selection bias, one shared
+expert, `swigluoai` activation), and **MiniMax Sparse Attention (MSA)** on the MoE layers: an index branch
+scores 128-token KV blocks (max of the raw `index_q . index_k` dot product, one index-key head shared by
+the 4 index-query heads) and attention runs only over each query's top-16 blocks plus its local block.
+
+```java
+MiniMax model = MiniMax.build("/models/MiniMax-M3-MXFP8", /*maxBatch*/ 8, /*maxSeqLen*/ 32768,
+        new byte[]{0, 1, 2, 3, 4, 5, 6, 7}, /*memFractionStatic*/ 0.85, /*pageSize*/ 16);
+ChatCompletion reply = model.chat(dialog, 512, 0.6, 0.95, false, 0, null);
+```
+
+| Class | Role |
+|---|---|
+| `MiniMax` | `LanguageModel` + `ModelExecutor` facade: `build`, bind / prefill / decode / finish, `encodeChat` |
+| `MiniMaxModelArgs` | Hyperparameters from `config.json` (`text_config`), weight mode |
+| `MiniMaxModel`, `MiniMaxBlock` | Decoder stack (one replica per expert-parallel rank) |
+| `MiniMaxAttention`, `MiniMaxSparse`, `MiniMaxIndexCache` | GQA, MSA block selection, index-key cache addressed by the KV pool's slots (so radix prefix reuse covers it) |
+| `MiniMaxMoE`, `MiniMaxMlp` | Router + experts (stacked weights), dense/shared FFN |
+| `MiniMaxShard` | Expert-parallel slice: rank, size, device |
+| `MiniMaxTokenizer`, `MiniMaxWeightNames` | Byte-level BPE (all added tokens atomic, as in the reference); HF tensor name mapping |
+
+**Checkpoints.** BF16 (`MiniMaxAI/MiniMax-M3`) and MXFP8 (`MiniMaxAI/MiniMax-M3-MXFP8`, FP8 E4M3 weights with an
+E8M0 scale per 32 elements). The text loader skips the vision tensors (loaded separately, see below) and the published
+checkpoint has no MTP weights; audio input is rejected (images and video are supported, see below).
+
+**Images and video.** The checkpoint's vision side (`vision_tower.*`, `multi_modal_projector.*`, `patch_merge_mlp.*`, ~1.7 GB,
+bf16) loads onto rank 0's device after the text weights (`SMILE_MINIMAX_VISION=0` skips it; a checkpoint without vision
+weights answers media requests with HTTP 400). `MiniMaxVisionTower` is a CLIP-style ViT (Conv3d patch embedding applied as
+a linear map, pre-LayerNorm, 32 pre-norm blocks with a partial 3D RoPE over frame/row/column, no post-LayerNorm) followed
+by the projector MLP and the 2x2 patch-merge MLP; attention is bidirectional inside each image or inside each group of at
+most 4 temporal patches of a video. `MiniMaxVisionProcessor` reproduces the reference image/video processors
+(`smart_resize` to multiples of 28 under 451,584 px per image or 602,112 px per video frame, bicubic antialiased resize,
+normalize, pad the frame count to a multiple of 2, merge-block patch order); `MiniMax.processMultimodal` applies the chat
+template and expands each `]<]image[>[` to `start, one placeholder per merged 2x2 patch group, end`, and each
+`]<]video[>[` to, per two-frame group, a `]<]t seconds[>[` timestamp followed by the same. `prefillMultimodal` encodes the
+media on rank 0, copies the embeddings to the other ranks and prefills in 2048-token windows with the placeholder rows
+replaced; sequences with media are never added to the prefix cache (their ids are placeholders). Media come from `data:`,
+http(s) or file URLs (images up to 64 MiB / 100 MP); videos are sampled with `ffmpeg`/`ffprobe` (1 fps by default, 4 to 768
+frames, so those binaries must exist in the runtime image) or read from a directory of numbered frame images. Verified
+on the real vision weights: the vision tower matches a reference built from vLLM's RoPE kernels to bf16 noise (relative
+L2 0.017), patches match the HF processors to 5e-7, and a 4-layer model's expanded prompts equal vLLM's token ids exactly
+with continuation log-probabilities within 0.011 (one image, two images, a video). A 100k-patch video encodes in ~3 s.
+Not done: audio, log-probabilities, tools together with media in one request.
+
+**Expert parallelism.** Each rank holds a contiguous slice of every layer's routed experts (allocated directly on its
+device); attention, dense FFNs, the router and the shared expert are replicated. Every rank routes all tokens, computes
+the tokens assigned to its own experts, and the partial outputs are summed with an all-reduce. In `smile-serve` the
+device list comes from `smile.chat.devices` (the number of ranks is its length). The full MXFP8 model is ~440 GB, so it
+does not fit one 8 x 40 GB node; the GPU test checkpoints are truncated to the first 4 / 16 layers.
+
+**MXFP8 weight modes** (`MiniMaxWeightMode`; `smile.chat.quantization` or `SMILE_MINIMAX_MXFP8` =
+`auto|marlin|fp8|fp8emu|dequant`):
+
+| Mode | Weights on device | GEMM | Hardware |
+|---|---|---|---|
+| `MARLIN` | FP8 + E8M0 (Marlin layout) | weight-only Marlin kernel, bf16 activations (vLLM generalized Marlin, vendored in `third_party/vllm_marlin`) | any CUDA GPU with bf16 (A100 and up) |
+| `FP8` | FP8 + 128x128 float scales (lossless re-expression of the E8M0 scales) | native block-scaled FP8 GEMM, activations quantized to FP8 (W8A8) | Hopper (sm_90) and newer |
+| `FP8_EMULATED` | same as `FP8` | emulated with dequantization | any CUDA GPU (tests) |
+| `DENSE` | bf16 (dequantized while loading) | bf16 matmul | reference, 2x the memory |
+
+`auto` picks `FP8` on Hopper+ only after `Fp8BlockGemm.selfCheck` (native vs emulated GEMM on a random problem) passes,
+otherwise `MARLIN`. **The native FP8 path has not been run on Hopper hardware yet**; run
+`MxFp8BlockFp8Test` there first. W8A8 is slightly noisier than W8A16 (activations are rounded to FP8).
+
+**Chat.** `MiniMaxChatTemplate` is a byte-exact port of `chat_template.jinja` (verified against transformers on golden
+prompts). The request field `thinking` (`enabled|disabled|adaptive`, or `{"type": ...}`; also
+`chat_template_kwargs.thinking_mode`) selects the thinking mode; unset means the model decides. Reasoning
+(`<mm:think>`) is returned as `<think>...</think>` like the other models. Tool calls use the
+`]<]minimax[>[<tool_call>` XML format, parsed by `MiniMaxToolCallParser` (typed from the request's tool schemas).
+
+**Decode performance.** On the `MARLIN` path a decode step is a handful of fused kernels (`smile_minimax_ops.cu`: Gemma
+RMSNorm, QK norm + RoPE, swigluoai, MoE routing, MSA block scoring/top-k) around the Marlin GEMMs; q/k/v and the two
+index projections run as one GEMM, and decode attention treats the query heads of a KV group as query rows (no K/V
+expansion). Slot indices, positions and masks are built once per step (`MiniMaxStep`). The whole step is captured in a
+CUDA graph per (batch, window): batches up to `SMILE_MINIMAX_CUDA_GRAPH_MAX_BATCH` (32), padded to the next power of
+two with copies of row 0 (so a padded row rewrites exactly what row 0 writes), the
+attention window rounded up to a multiple of 256 (at most ~12.5% above the context), at most
+`SMILE_MINIMAX_CUDA_GRAPH_MAX_ENTRIES` (48) graphs; larger batches, and any capture failure, run eagerly (set
+`SMILE_MINIMAX_GRAPH_DEBUG=1` to print the failure's stack trace; the warning is only logged).
+`SMILE_MINIMAX_CUDA_GRAPH=0` disables graphs, `SMILE_FUSED_OPS=0` the fused kernels, `SMILE_MINIMAX_FUSE_QKV=0` the
+merged projection. Measured on A100 (context 512): 4 layers on 1 GPU 13.7 -> 3.9 ms/step (batch 8); 16 layers on 8 GPUs
+24 -> 11 ms/step (batch 8), 24 -> 15 ms (batch 32).
+
+**Block-sparse attention (decode and prefill).** On MSA layers the select kernel returns the chosen block ids per query
+token and `smile_sparse_decode_attention` attends over just those blocks (one CTA per token, KV group and block: the 16
+query heads of the group over 128 keys, fp32 softmax partials, then a merge kernel), reading K/V straight from the pool
+by slot. Nothing is quadratic in the window: no `[S, L]` score matrix, no mask, no full-window K/V gather, so long
+prompts no longer run out of memory (the reference tensor-op path needed ~15 GB for a 16k-token prompt) and decode cost
+follows the 16 selected blocks. The same kernels serve decode (one token per row) and prefill windows (token `t` of a
+row sits at `positions[row] + t % seqlen`); the partial-softmax workspace is chunked to ~256 MB. Requires bf16 K/V, head
+dim 128 and 16 query heads per KV head; otherwise the masked SDPA path runs. `SMILE_SPARSE_DECODE_ATTENTION=0` forces
+that path. Measured (4 layers, 1 GPU, A100): decode at context 6000 / batch 8 6.4 -> 5.8 ms/step; contexts 16000 and
+30000 (impossible before) decode at 6.5 and 9.2 ms/step at batch 1.
+
+**Limits.** The three dense layers still use masked SDPA for prefill; the block scorer uses CUDA cores (no tensor
+cores) and every query token re-reads its selected K/V blocks, so very long prefills are compute-bound; non-Marlin
+weight modes route on the host (no CUDA graphs); no speculative decoding, log-probabilities, tensor-parallel attention
+or multi-node execution.
+Opt-in tests that need a checkpoint or GPUs read `MINIMAX_*` environment variables (see the test javadoc).
+
+---
+
+## Inference Engine (`smile.llm.engine`)
+
+`InferenceEngine` is the continuous-batching runtime used by serve. It admits
+work up to `maxInFlight` while KV pages are free (**Fluid Injection**), prefills
+(optionally chunked under a token budget), then runs a batched `decodeStep`
+over all decoding requests. `GenerationHandle.abort()` performs **Instant
+Eviction** of queued and in-flight KV.
+
+| Type | Role |
+|---|---|
+| `InferenceEngine` | Scheduler + worker thread; `submit(...)` returns a `GenerationHandle` |
+| `ModelExecutor` | Low-level surface: `bind` / `prefill` / `decodeStep` (implemented by `Llama`, `Qwen`) |
+| `GenerationRequest` | One job: prompt tokens or dialog, sampling params, optional multimodal input |
+| `GenerationHandle` | In-flight handle: `future()`, `abort()`, `isAborted()` |
+| `SpeculativeDecoding` | MTP draft / verify helpers |
+| `DecodeCudaGraph` / `VerifyCudaGraph` | CUDA-graph capture for decode / verify |
+| `Sampling` | Temperature / top-p sampling |
+
+```java
+import smile.llm.engine.InferenceEngine;
+import smile.llm.engine.GenerationRequest;
+import smile.llm.engine.GenerationHandle;
+
+try (var engine = new InferenceEngine(llama, /*maxInFlight=*/ 8)) {
+    GenerationHandle handle = engine.submit(
+            GenerationRequest.ofTokens(prompt, 256, 0.6, 0.9, false, 0L, listener));
+    ChatCompletion reply = handle.future().join();
+}
+```
+
+`GenerationRequest` can also carry a dialog (encoded by the engine), a
+`QwenVlProcessor.ProcessedMultimodal` for vision input, `ChatOptions` for tool
+calling, and speculative-decoding flags.
+
+Runtime introspection: `queueSize()`, `inFlight()`, `kvFreeSlots()`,
+`kvFreePages()`, `activeDecodeCount()`, and cumulative timing counters
+(`queueWaitMsTotal()`, `prefillMsTotal()`, `decodeMsTotal()`).
+
+> **Serve / multi-request:** one prompt per `GenerationRequest`, with
+> `smile.chat.max-batch-size` as the in-flight cap. Streaming disconnect calls
+> `GenerationHandle.abort()`, which cooperatively stops decode between steps
+> and frees KV.
+
+---
+
+## KV Cache & Radix Prefix Reuse (`smile.llm.cache`)
+
+`KvCachePool` is a paged KV-cache allocator. Pages are the unit of allocation
+(`DEFAULT_PAGE_SIZE = 16` tokens), and `RadixCache` organizes cached prefixes in
+a compressed radix tree so shared system prompts and conversation histories are
+computed once and reused across requests.
+
+| Type | Role |
+|---|---|
+| `KvCachePool` | Paged KV storage; `bind` / `put` / `get` / `finishRequest` |
+| `RadixCache` | Longest-prefix match / insert over token sequences |
+| `KvCacheLayout` | Layer / head / dim layout descriptor |
+| `FlashInferKvMetadata` | CSR metadata for the FlashInfer attention path |
+| `KvCacheExhaustedException` | Thrown when no free pages remain |
+
+```java
+// Static-region budget (SGLang --mem-fraction-static semantics)
+KvCachePool.StaticKvBudget budget = KvCachePool.computeStaticKvBudget(...);
+KvCachePool pool = KvCachePool.allocate(layout, device, ScalarType.BFloat16, budget);
+
+pool.setPrefixReuseEnabled(true);   // enable radix match/insert across requests
+```
+
+Prefix reuse is enabled per model via `Llama.setPrefixReuseEnabled(...)` /
+`Qwen.setPrefixReplayEnabled(...)`.
+
+---
+
+## Attention Backends (`smile.llm.attention`)
+
+`AttentionBackends.install(...)` selects the process-wide attention kernel at
+chat-service startup:
+
+| Backend | Notes |
+|---|---|
+| `TORCH_NATIVE` | Default; pure LibTorch attention |
+| `FLASHINFER` | Requires a `libsmile_torch` built with `USE_FLASHINFER`; falls back to `TORCH_NATIVE` with a warning when unavailable |
+
+```java
+AttentionBackends.install(AttentionBackend.FLASHINFER);
+```
+
+---
+
+## Quantization (`smile.llm.quant`)
+
+Weight-quantization backends for memory- and bandwidth-bound inference. The
+checkpoint format is detected automatically and resolved to a GEMM backend:
+
+| `QuantFormat` | Meaning |
+|---|---|
+| `DENSE` | Dense BF16 / FP16 / FP32 weights |
+| `FP8` | Native FP8 (e4m3 / e5m2) weights + scales |
+| `NVFP4` | Native NVFP4 weights (Blackwell) |
+| `GPTQ` | HuggingFace GPTQ INT4 |
+| `AWQ` | HuggingFace AWQ INT4 |
+
+```java
+QuantPolicy.Resolved resolved = QuantPolicy.resolve(checkpointDir, device, backendOverride);
+// resolved.format()  → QuantFormat
+// resolved.backend() → WeightGemmBackend (FP8 / NVFP4 primary, Marlin Ampere failover)
+```
+
+`QuantLinearFactory` builds the appropriate linear layer (`Fp8Linear`,
+`Fp8BlockLinear`, `Nvfp4Linear`, `MarlinLinear`) for the resolved format.
+
+---
+
+## Tensor Parallelism (`smile.llm.parallel`)
+
+In-process tensor parallelism for multi-GPU inference. Pipeline axes are
+reserved for future multi-node PP.
+
+| Type | Role |
+|---|---|
+| `ParallelConfig` | `(tpSize, ppSize, dpSize, devices)`; `single(...)`, `tensorParallel(...)` |
+| `TensorParallelGroup` | Rank group + collective ops |
+| `ColumnParallelLinear` / `RowParallelLinear` | Sharded linear layers |
+| `WeightSharding` / `TensorShardSpec` | Weight partitioning |
+
+```java
+import smile.llm.parallel.ParallelConfig;
+
+ParallelConfig tp = ParallelConfig.tensorParallel((byte) 0, (byte) 1);
+Qwen qwen = Qwen.build(dir, /*maxBatchSize=*/ 8, /*maxSeqLen=*/ 8192,
+        (byte) 0, /*memFractionStatic=*/ 0.85, "bfloat16", tp);
+```
+
+---
+
+## Tool Calling & Chat Templates
+
+`ChatOptions` carries the tools and selection policy for a request; the model
+injects them into the chat template and parses tool calls out of the output.
+
+```java
+import smile.llm.ChatOptions;
+import smile.llm.ToolDefinition;
+import smile.llm.FunctionDefinition;
+
+ChatOptions options = new ChatOptions(
+        new ToolDefinition[]{ new ToolDefinition(new FunctionDefinition(
+                "get_weather", "Get the current weather", parametersSchema)) },
+        ToolChoice.AUTO,
+        /*parallelToolCalls=*/ true);
+
+int[] prompt = model.encodeChat(dialog, options);
+```
+
+| Type | Role |
+|---|---|
+| `ChatTemplate` | Interface for model-specific prompt formatting |
+| `Qwen3ChatTemplate` | Qwen3.5 / Qwen3.8 chat template, byte-exact port of `chat_template.jinja` (thinking, reasoning effort, tools, tool results, history) |
+| `MiniMaxChatTemplate` | MiniMax-M3 chat template (thinking modes, tools, tool results) |
+| `ToolCallParser` | Interface for parsing tool calls from generated text |
+| `JsonToolCallParser` / `Qwen3XmlToolCallParser` / `MiniMaxToolCallParser` | Concrete parsers |
+| `AssistantTextSanitizer` | Strips tool-call markup from assistant text |
+
+---
+
+*SMILE — Copyright © 2010–2026 Haifeng Li. GNU GPL v3 licensed.*

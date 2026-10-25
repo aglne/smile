@@ -1,0 +1,157 @@
+####
+#
+# Copyright (c) 2010-2026 Haifeng Li. All rights reserved.
+#
+# SMILE Serve is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
+#
+# SMILE Serve is distributed in the hope that it will be useful, but
+# WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+# Affero General Public License for more details.
+#
+# You should have received a copy of the GNU Affero General Public
+# License along with SMILE Serve. If not, see
+# <https://www.gnu.org/licenses/>.
+#
+####
+
+###
+# This Dockerfile is used in order to build a container that runs the Quarkus application in JVM mode
+#
+# Before building the container image run:
+#
+# ./gradlew :serve:build -Dquarkus.profile=local
+#
+# (-Dquarkus.profile=local: embedded H2 database; omit it for PostgreSQL, i.e. `prod`.)
+#
+# Then, build the image with:
+#
+# docker build -f serve/src/main/docker/Dockerfile -t quarkus/smile-serve-jvm serve
+#
+# Then run the container using:
+#
+# docker run -i --rm -p 8888:8080 -u root -v "$(pwd)/model":/model quarkus/smile-serve-jvm
+#
+# If you want to include the debug port into your docker image
+# you will have to expose the debug port (default 5005 being the default) like this :  EXPOSE 8080 5005.
+# Additionally you will have to set -e JAVA_DEBUG=true and -e JAVA_DEBUG_PORT=*:5005
+# when running the container
+#
+# Then run the container using :
+#
+# docker run -i --rm -p 8888:8080 -u root -v "$(pwd)/model":/model \
+#   -e JAVA_DEBUG=true -e "JAVA_DEBUG_PORT=*:5005" quarkus/smile-serve-jvm
+#
+# This image uses the `run-java.sh` script to run the application.
+# This scripts computes the command line to execute your Java application, and
+# includes memory/GC tuning.
+# You can configure the behavior using the following environment properties:
+# - JAVA_OPTS: JVM options passed to the `java` command (example: "-verbose:class") - Be aware that this will override
+# the default JVM options, use `JAVA_OPTS_APPEND` to append options
+# - JAVA_OPTS_APPEND: User specified Java options to be appended to generated options
+#   in JAVA_OPTS (example: "-Dsome.property=foo")
+# - JAVA_MAX_MEM_RATIO: Is used when no `-Xmx` option is given in JAVA_OPTS. This is
+#   used to calculate a default maximal heap memory based on a containers restriction.
+#   If used in a container without any memory constraints for the container then this
+#   option has no effect. If there is a memory constraint then `-Xmx` is set to a ratio
+#   of the container available memory as set here. The default is `50` which means 50%
+#   of the available memory is used as an upper boundary. You can skip this mechanism by
+#   setting this value to `0` in which case no `-Xmx` option is added.
+# - JAVA_INITIAL_MEM_RATIO: Is used when no `-Xms` option is given in JAVA_OPTS. This
+#   is used to calculate a default initial heap memory based on the maximum heap memory.
+#   If used in a container without any memory constraints for the container then this
+#   option has no effect. If there is a memory constraint then `-Xms` is set to a ratio
+#   of the `-Xmx` memory as set here. The default is `25` which means 25% of the `-Xmx`
+#   is used as the initial heap size. You can skip this mechanism by setting this value
+#   to `0` in which case no `-Xms` option is added (example: "25")
+# - JAVA_MAX_INITIAL_MEM: Is used when no `-Xms` option is given in JAVA_OPTS.
+#   This is used to calculate the maximum value of the initial heap memory. If used in
+#   a container without any memory constraints for the container then this option has
+#   no effect. If there is a memory constraint then `-Xms` is limited to the value set
+#   here. The default is 4096MB which means the calculated value of `-Xms` never will
+#   be greater than 4096MB. The value of this variable is expressed in MB (example: "4096")
+# - JAVA_DIAGNOSTICS: Set this to get some diagnostics information to standard output
+#   when things are happening. This option, if set to true, will set
+#  `-XX:+UnlockDiagnosticVMOptions`. Disabled by default (example: "true").
+# - JAVA_DEBUG: If set remote debugging will be switched on. Disabled by default (example:
+#    true").
+# - JAVA_DEBUG_PORT: Port used for remote debugging. Defaults to 5005 (example: "8787").
+# - CONTAINER_CORE_LIMIT: A calculated core limit as described in
+#   https://www.kernel.org/doc/Documentation/scheduler/sched-bwc.txt. (example: "2")
+# - CONTAINER_MAX_MEMORY: Memory limit given to the container (example: "1024").
+# - GC_MIN_HEAP_FREE_RATIO: Minimum percentage of heap free after GC to avoid expansion.
+#   (example: "20")
+# - GC_MAX_HEAP_FREE_RATIO: Maximum percentage of heap free after GC to avoid shrinking.
+#   (example: "40")
+# - GC_TIME_RATIO: Specifies the ratio of the time spent outside the garbage collection.
+#   (example: "4")
+# - GC_ADAPTIVE_SIZE_POLICY_WEIGHT: The weighting given to the current GC time versus
+#   previous GC times. (example: "90")
+# - GC_METASPACE_SIZE: The initial metaspace size. (example: "20")
+# - GC_MAX_METASPACE_SIZE: The maximum metaspace size. (example: "100")
+# - GC_CONTAINER_OPTIONS: Specify Java GC to use. The value of this variable should
+#   contain the necessary JRE command-line options to specify the required GC, which
+#   will override the default of `-XX:+UseParallelGC` (example: -XX:+UseG1GC).
+# - HTTPS_PROXY: The location of the https proxy. (example: "myuser@127.0.0.1:8080")
+# - HTTP_PROXY: The location of the http proxy. (example: "myuser@127.0.0.1:8080")
+# - NO_PROXY: A comma separated lists of hosts, IP addresses or domains that can be
+#   accessed directly. (example: "foo.example.com,bar.example.com")
+#
+###
+FROM registry.access.redhat.com/ubi10/openjdk-25-runtime:1.24
+
+LABEL org.opencontainers.image.title="SMILE Serve" \
+      org.opencontainers.image.licenses="AGPL-3.0-or-later OR LicenseRef-SMILE-Commercial" \
+      org.opencontainers.image.source="https://github.com/haifengl/smile" \
+      org.opencontainers.image.url="https://www.aihalo.dev/licensing.html"
+
+ENV LANGUAGE='en_US:en'
+
+USER root
+# Install the OpenMP build of OpenBLAS (the ubi10 `openblas` package itself ships no libraries) for native BLAS/LAPACK. ARPACK (and the FlexiBLAS/EPEL packages it needs) is deliberately
+# absent: only fit-time code (smile.manifold, SpectralClustering) uses it, never inference.
+RUN microdnf install -y openblas-openmp libgomp && microdnf clean all
+# The app dlopens libopenblas.so (smile.lib.blas / smile.lib.lapack default), but the OpenMP build is named libopenblaso.
+RUN ln -s libopenblaso.so.0 /usr/lib64/libopenblas.so
+# Install gzip and tar to extract the ONNX Runtime and ONNX Runtime GenAI tarballs
+RUN microdnf install -y gzip tar && microdnf clean all
+
+# Install ONNX Runtime
+ARG ORT_VERSION=1.30.0
+RUN curl -L https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/onnxruntime-linux-x64-${ORT_VERSION}.tgz \
+    | tar -zxv -C /usr/local/ \
+    && mv /usr/local/onnxruntime-linux-x64-${ORT_VERSION} /usr/local/onnxruntime
+
+# Install ONNX Runtime GenAI (libonnxruntime-genai.so): the CPU chat path. Without CUDA the chat engine loads
+# pre-converted GenAI (ONNX) packages through it, not LibTorch (LibTorch chat needs a GPU: Dockerfile.gpu).
+ARG GENAI_VERSION=0.17.0
+ARG GENAI_SHA256=482a17113556ff76c53820b801f391cdcbaac0b6c4089065182683c03fdbc8d9
+RUN curl -fsSL --retry 5 --retry-delay 10 -o /tmp/genai.tgz \
+        "https://github.com/microsoft/onnxruntime-genai/releases/download/v${GENAI_VERSION}/onnxruntime-genai-${GENAI_VERSION}-linux-x64.tar.gz" \
+    && echo "${GENAI_SHA256}  /tmp/genai.tgz" | sha256sum -c - \
+    && mkdir -p /usr/local/onnxruntime-genai/lib \
+    && tar -zx -C /usr/local/onnxruntime-genai/lib --strip-components=2 --wildcards '*/lib/libonnxruntime-genai.so' -f /tmp/genai.tgz \
+    && rm -f /tmp/genai.tgz
+
+# We make four distinct layers so if there are application changes the library layers can be re-used
+COPY --chown=185 build/quarkus-app/lib/ /deployments/lib/
+COPY --chown=185 build/quarkus-app/*.jar /deployments/
+COPY --chown=185 build/quarkus-app/app/ /deployments/app/
+COPY --chown=185 build/quarkus-app/quarkus/ /deployments/quarkus/
+
+# ORT + ORT GenAI
+ENV LD_LIBRARY_PATH="/usr/local/onnxruntime/lib:/usr/local/onnxruntime-genai/lib:/deployments/lib"
+ENV ONNXRUNTIME_NATIVE_PATH="/usr/local/onnxruntime/lib" \
+    ONNXRUNTIME_GENAI_NATIVE_PATH="/usr/local/onnxruntime-genai/lib"
+
+EXPOSE 8080
+USER 185
+ENV HF_HOME="/model/huggingface"
+ENV JAVA_APP_JAR="/deployments/quarkus-run.jar"
+ENV JAVA_OPTS_APPEND="${JAVA_OPTS_APPEND} -Djava.util.logging.manager=org.jboss.logmanager.LogManager --add-opens java.base/java.lang=ALL-UNNAMED --add-opens java.base/java.nio=ALL-UNNAMED --enable-native-access ALL-UNNAMED"
+
+ENTRYPOINT [ "/opt/jboss/container/java/run/run-java.sh" ]
+

@@ -1,0 +1,860 @@
+/*
+ * Copyright (c) 2026 Haifeng Li. All rights reserved.
+ *
+ * SPDX-License-Identifier: BUSL-1.1
+ *
+ * This software is licensed under the Business Source License version 1.1 (BSL 1.1).
+ * Use of this work is governed by the BSL 1.1 terms and conditions set forth in
+ * the studio/LICENSE file (or LICENSE file in standalone distributions) and at
+ * https://mariadb.com/bsl11.
+ *
+ * Use of this work is strictly for evaluation and/or non-production purposes.
+ * For commercial production use, please contact sales@aihalo.dev.
+ *
+ * Effective on the Change Date (four years from the first publication of this
+ * version), this file automatically converts to the GNU Affero General Public
+ * License version 3.0 (AGPLv3) or later.
+ */
+package smile.shell;
+
+import java.io.File;
+import java.io.Serializable;
+import java.util.Arrays;
+import java.util.Properties;
+import picocli.CommandLine.Command;
+import picocli.CommandLine.Option;
+import smile.data.DataFrame;
+import smile.data.formula.Formula;
+import smile.io.Read;
+import smile.io.Write;
+import smile.math.MathEx;
+import smile.model.*;
+import smile.model.cart.SplitRule;
+
+/**
+ * Trains a supervised learning model.
+ *
+ * @author Haifeng Li
+ */
+@Command(name = "smile train", versionProvider = VersionProvider.class,
+        description = "Train a supervised learning model.",
+        mixinStandardHelpOptions = true)
+public class Train {
+    @Option(names = {"-m", "--model"}, required = true, paramLabel = "<file>", description = "The model file.")
+    private File model;
+    @Option(names = {"--model-id"}, description = "The model id.")
+    private String id;
+    @Option(names = {"--model-version"}, paramLabel = "<ver>", description = "The model version.")
+    private String version;
+    @Option(names = {"--formula"}, description = "The model formula <class ~ .>.")
+    private String formula;
+    @Option(names = {"-d", "--data"}, required = true, paramLabel = "<file>", description = "The training data file.")
+    private File train;
+    @Option(names = {"--test"}, paramLabel = "<file>", description = "The test data file.")
+    private File test;
+    @Option(names = {"--format"}, description = "The data file format.")
+    private String format;
+    @Option(names = {"-k", "--kfold"}, paramLabel = "<fold>", description = "k-fold cross validation.")
+    private int kfold = 1;
+    @Option(names = {"-r", "--round"}, description = "The number of rounds of repeated cross validation.")
+    private int round = 1;
+    @Option(names = {"-e", "--ensemble"}, description = "Create the ensemble of cross validation models.")
+    private boolean ensemble = false;
+    @Option(names = {"-s", "--seed"}, description = "The random number generator seed.")
+    private long seed = 0;
+    /** The algorithm name. */
+    private String algorithm;
+    /** The problem type is classification. */
+    private boolean classification = true;
+    /** The problem type is clustering. */
+    private boolean clustering = false;
+    /** The problem type is vector quantization. */
+    private boolean quantizer = false;
+    /** The problem type is anomaly detection. */
+    private boolean anomaly = false;
+    /** The hyperparameter key-value pairs. */
+    private Properties params = new Properties();
+
+    /** Runs the training algorithm. */
+    private void run() throws Exception {
+        var path = model.toPath();
+        var data = Read.data(train.getCanonicalPath(), format);
+        var columns = Arrays.asList(data.names());
+
+        if (seed != 0) {
+           MathEx.setSeed(seed);
+        }
+
+        if (clustering) {
+            Formula modelFormula = formula != null ? Formula.of(formula) : Formula.rhs(".");
+            var m = Model.clustering(algorithm, modelFormula, data, params);
+            System.out.println(m.clustering());
+            saveModel(m, path);
+            return;
+        }
+
+        if (quantizer) {
+            Formula modelFormula = formula != null ? Formula.of(formula) : Formula.rhs(".");
+            var m = Model.quantizer(algorithm, modelFormula, data, params);
+            System.out.println("Trained " + m.algorithm() + " vector quantizer on " + data.size() + " rows.");
+            saveModel(m, path);
+            return;
+        }
+
+        if (anomaly) {
+            Formula modelFormula = formula != null ? Formula.of(formula) : Formula.rhs(".");
+            var m = Model.anomaly(algorithm, modelFormula, data, params);
+            System.out.println("Trained " + m.algorithm() + " anomaly detector on " + data.size() + " rows.");
+            saveModel(m, path);
+            return;
+        }
+
+        Formula modelFormula;
+        if (formula != null) {
+            modelFormula = Formula.of(formula);
+        } else if (columns.contains("class")) {
+            modelFormula = Formula.lhs("class");
+        } else if (columns.contains("target")) {
+            modelFormula = Formula.lhs("target");
+        } else if (columns.contains("y")) {
+            modelFormula = Formula.lhs("y");
+        } else {
+            modelFormula = Formula.lhs(columns.getFirst());
+        }
+
+        DataFrame testData = null;
+        if (test != null) {
+            testData = Read.data(test.getCanonicalPath(), format);
+        }
+
+        if (classification) {
+            var m = Model.classification(algorithm, modelFormula, data, testData, params, kfold, round, ensemble);
+            printMetrics(m);
+            saveModel(m, path);
+        } else {
+            var m = Model.regression(algorithm, modelFormula, data, testData, params, kfold, round, ensemble);
+            printMetrics(m);
+            saveModel(m, path);
+        }
+    }
+
+    /** Prints training, validation and test metrics for a classification model. */
+    private static void printMetrics(ClassificationModel m) {
+        System.out.println("Training metrics: " + m.train());
+        if (m.validation() != null) {
+            System.out.println("Validation metrics: " + m.validation());
+        }
+        if (m.test() != null) {
+            System.out.println("Test metrics: " + m.test());
+        }
+    }
+
+    /** Prints training, validation and test metrics for a regression model. */
+    private static void printMetrics(RegressionModel m) {
+        System.out.println("Training metrics: " + m.train());
+        if (m.validation() != null) {
+            System.out.println("Validation metrics: " + m.validation());
+        }
+        if (m.test() != null) {
+            System.out.println("Test metrics: " + m.test());
+        }
+    }
+
+    /** Stamps model metadata and serializes it to disk. */
+    private <T extends Model & Serializable> void saveModel(T m, java.nio.file.Path path) throws Exception {
+        if (id != null) {
+            m.setTag(Model.ID, id);
+        }
+        if (version != null) {
+            m.setTag(Model.VERSION, version);
+        }
+        Write.object(m, path);
+    }
+
+    @Command(name = "random-forest", description = "Random Forest",
+             mixinStandardHelpOptions = true)
+    void randomForest(
+          @Option(names = {"--regression"}, description = "Train a regression model.")
+          boolean regression,
+          @Option(names = {"--trees"}, paramLabel = "<trees>", description = "The number of trees.")
+          int trees,
+          @Option(names = {"--mtry"}, paramLabel = "<features>", description = "The number of features to train node split.")
+          int mtry,
+          @Option(names = {"--split"}, paramLabel = "<rule>", description = "The split rule <GINI, ENTROPY, CLASSIFICATION_ERROR>.")
+          SplitRule split,
+          @Option(names = {"--max-depth"}, paramLabel = "<depth>", description = "The maximum tree depth.")
+          int maxDepth,
+          @Option(names = {"--max-nodes"}, paramLabel = "<nodes>", description = "The maximum number of leaf nodes.")
+          int maxNodes,
+          @Option(names = {"--node-size"}, paramLabel = "<size>", description = "The minimum leaf node size.")
+          int nodeSize,
+          @Option(names = {"--sampling"}, paramLabel = "<rate>", description = "The sampling rate.")
+          double sampling,
+          @Option(names = {"--class-weight"}, paramLabel = "<weights>", description = "The class weights.")
+          String classWeight) throws Exception {
+
+        algorithm = "random-forest";
+        classification = !regression;
+        if (trees > 0) params.setProperty("smile.random_forest.trees", String.valueOf(trees));
+        if (mtry > 0) params.setProperty("smile.random_forest.mtry", String.valueOf(mtry));
+        if (split != null) params.setProperty("smile.random_forest.split_rule", split.name());
+        if (maxDepth > 0) params.setProperty("smile.random_forest.max_depth", String.valueOf(maxDepth));
+        if (maxNodes > 0) params.setProperty("smile.random_forest.max_nodes", String.valueOf(maxNodes));
+        if (nodeSize > 0) params.setProperty("smile.random_forest.node_size", String.valueOf(nodeSize));
+        if (sampling > 0) params.setProperty("smile.random_forest.sampling_rate", String.valueOf(sampling));
+        if (classWeight != null) params.setProperty("smile.random_forest.class_weight", classWeight);
+        run();
+    }
+
+    @Command(name = "gradient-boost", description = "Gradient Boosting",
+             mixinStandardHelpOptions = true)
+    void gradientBoost(
+            @Option(names = {"--regression"}, description = "Train a regression model.")
+            boolean regression,
+            @Option(names = {"--trees"}, paramLabel = "<trees>", description = "The number of trees.")
+            int trees,
+            @Option(names = {"--shrinkage"}, paramLabel = "<scale>", description = "The shrinkage parameter in (0, 1] controls the learning rate.")
+            double shrinkage,
+            @Option(names = {"--max-depth"}, paramLabel = "<depth>", description = "The maximum tree depth.")
+            int maxDepth,
+            @Option(names = {"--max-nodes"}, paramLabel = "<nodes>", description = "The maximum number of leaf nodes.")
+            int maxNodes,
+            @Option(names = {"--node-size"}, paramLabel = "<size>", description = "The minimum leaf node size.")
+            int nodeSize,
+            @Option(names = {"--sampling"}, paramLabel = "<rate>", description = "The sampling rate.")
+            double sampling) throws Exception {
+
+        algorithm = "gradient-boost";
+        classification = !regression;
+        if (trees > 0) params.setProperty("smile.gradient_boost.trees", String.valueOf(trees));
+        if (shrinkage > 0) params.setProperty("smile.gradient_boost.shrinkage", String.valueOf(shrinkage));
+        if (maxDepth > 0) params.setProperty("smile.gradient_boost.max_depth", String.valueOf(maxDepth));
+        if (maxNodes > 0) params.setProperty("smile.gradient_boost.max_nodes", String.valueOf(maxNodes));
+        if (nodeSize > 0) params.setProperty("smile.gradient_boost.node_size", String.valueOf(nodeSize));
+        if (sampling > 0) params.setProperty("smile.gradient_boost.sampling_rate", String.valueOf(sampling));
+        run();
+    }
+
+    @Command(name = "ada-boost", description = "Adaptive Boosting",
+             mixinStandardHelpOptions = true)
+    void adaBoost(
+            @Option(names = {"--trees"}, paramLabel = "<trees>", description = "The number of trees.")
+            int trees,
+            @Option(names = {"--max-depth"}, paramLabel = "<depth>", description = "The maximum tree depth.")
+            int maxDepth,
+            @Option(names = {"--max-nodes"}, paramLabel = "<nodes>", description = "The maximum number of leaf nodes.")
+            int maxNodes,
+            @Option(names = {"--node-size"}, paramLabel = "<size>", description = "The minimum leaf node size.")
+            int nodeSize) throws Exception {
+
+        algorithm = "ada-boost";
+        if (trees > 0) params.setProperty("smile.adaboost.trees", String.valueOf(trees));
+        if (maxDepth > 0) params.setProperty("smile.adaboost.max_depth", String.valueOf(maxDepth));
+        if (maxNodes > 0) params.setProperty("smile.adaboost.max_nodes", String.valueOf(maxNodes));
+        if (nodeSize > 0) params.setProperty("smile.adaboost.node_size", String.valueOf(nodeSize));
+        run();
+    }
+
+    @Command(name = "cart", description = "Classification and Regression Tree",
+             mixinStandardHelpOptions = true)
+    void cart(
+            @Option(names = {"--regression"}, description = "Train a regression model.")
+            boolean regression,
+            @Option(names = {"--split"}, paramLabel = "<rule>", description = "The split rule <GINI, ENTROPY, CLASSIFICATION_ERROR>.")
+            SplitRule split,
+            @Option(names = {"--max-depth"}, paramLabel = "<depth>", description = "The maximum tree depth.")
+            int maxDepth,
+            @Option(names = {"--max-nodes"}, paramLabel = "<nodes>", description = "The maximum number of leaf nodes.")
+            int maxNodes,
+            @Option(names = {"--node-size"}, paramLabel = "<size>", description = "The minimum leaf node size.")
+            int nodeSize) throws Exception {
+
+        algorithm = "cart";
+        classification = !regression;
+        if (split != null) params.setProperty("smile.cart.split_rule", split.name());
+        if (maxDepth > 0) params.setProperty("smile.cart.max_depth", String.valueOf(maxDepth));
+        if (maxNodes > 0) params.setProperty("smile.cart.max_nodes", String.valueOf(maxNodes));
+        if (nodeSize > 0) params.setProperty("smile.cart.node_size", String.valueOf(nodeSize));
+        run();
+    }
+
+    @Command(name = "logistic", description = "Logistic Regression",
+             mixinStandardHelpOptions = true)
+    void logistic(
+            @Option(names = {"--transform"}, paramLabel = "<rule>", description = "The feature transformation <standardizer, winsor(0.01,0.99), minmax, MaxAbs, L1, L2, Linf>.")
+            String transform,
+            @Option(names = {"--lambda"}, paramLabel = "<value>", description = "The regularization on linear weights.")
+            double lambda,
+            @Option(names = {"--iterations"}, paramLabel = "<value>", description = "The maximum number of iterations.")
+            int iterations,
+            @Option(names = {"--tolerance"}, paramLabel = "<value>", description = "The tolerance to stop iterations.")
+            double tolerance) throws Exception {
+
+        algorithm = "logistic";
+        if (transform != null) params.setProperty("smile.feature.transform", transform);
+        if (lambda > 0) params.setProperty("smile.logistic.lambda", String.valueOf(lambda));
+        if (iterations > 0) params.setProperty("smile.logistic.iterations", String.valueOf(iterations));
+        if (tolerance > 0) params.setProperty("smile.logistic.tolerance", String.valueOf(tolerance));
+        run();
+    }
+
+    @Command(name = "fisher", description = "Fisher's Linear Discriminant",
+             mixinStandardHelpOptions = true)
+    void fisher(
+            @Option(names = {"--transform"}, paramLabel = "<rule>", description = "The feature transformation <standardizer, winsor(0.01,0.99), minmax, MaxAbs, L1, L2, Linf>.")
+            String transform,
+            @Option(names = {"--dimension"}, paramLabel = "<value>", description = "The dimension of mapped space.")
+            int dimension,
+            @Option(names = {"--tolerance"}, paramLabel = "<value>", description = "The tolerance if a covariance matrix is singular.")
+            double tolerance) throws Exception {
+
+        algorithm = "fisher";
+        if (transform != null) params.setProperty("smile.feature.transform", transform);
+        if (dimension > 0) params.setProperty("smile.fisher.dimension", String.valueOf(dimension));
+        if (tolerance > 0) params.setProperty("smile.fisher.tolerance", String.valueOf(tolerance));
+        run();
+    }
+
+    @Command(name = "lda", description = "Linear Discriminant Analysis",
+             mixinStandardHelpOptions = true)
+    void lda(
+            @Option(names = {"--transform"}, paramLabel = "<rule>", description = "The feature transformation <standardizer, winsor(0.01,0.99), minmax, MaxAbs, L1, L2, Linf>.")
+            String transform,
+            @Option(names = {"--priori"}, paramLabel = "<value>", description = "The priori probability of each class.")
+            String priori,
+            @Option(names = {"--tolerance"}, paramLabel = "<value>", description = "The tolerance if a covariance matrix is singular.")
+            double tolerance) throws Exception {
+
+        algorithm = "lda";
+        if (transform != null) params.setProperty("smile.feature.transform", transform);
+        if (priori != null) params.setProperty("smile.lda.priori", priori);
+        if (tolerance > 0) params.setProperty("smile.lda.tolerance", String.valueOf(tolerance));
+        run();
+    }
+
+    @Command(name = "qda", description = "Quadratic Discriminant Analysis",
+             mixinStandardHelpOptions = true)
+    void qda(
+            @Option(names = {"--transform"}, paramLabel = "<rule>", description = "The feature transformation <standardizer, winsor(0.01,0.99), minmax, MaxAbs, L1, L2, Linf>.")
+            String transform,
+            @Option(names = {"--priori"}, paramLabel = "<value>", description = "The priori probability of each class.")
+            String priori,
+            @Option(names = {"--tolerance"}, paramLabel = "<value>", description = "The tolerance if a covariance matrix is singular.")
+            double tolerance) throws Exception {
+
+        algorithm = "qda";
+        if (transform != null) params.setProperty("smile.feature.transform", transform);
+        if (priori != null) params.setProperty("smile.qda.priori", priori);
+        if (tolerance > 0) params.setProperty("smile.qda.tolerance", String.valueOf(tolerance));
+        run();
+    }
+
+    @Command(name = "rda", description = "Regularized Discriminant Analysis",
+             mixinStandardHelpOptions = true)
+    void rda(
+            @Option(names = {"--transform"}, paramLabel = "<rule>", description = "The feature transformation <standardizer, winsor(0.01,0.99), minmax, MaxAbs, L1, L2, Linf>.")
+            String transform,
+            @Option(names = {"--alpha"}, paramLabel = "<value>", required = true, description = "The regularization factor in [0, 1] allows a continuum of models between LDA and QDA.")
+            double alpha,
+            @Option(names = {"--priori"}, paramLabel = "<value>", description = "The priori probability of each class.")
+            String priori,
+            @Option(names = {"--tolerance"}, paramLabel = "<value>", description = "The tolerance if a covariance matrix is singular.")
+            double tolerance) throws Exception {
+
+        algorithm = "rda";
+        params.setProperty("smile.rda.alpha", String.valueOf(alpha));
+        if (transform != null) params.setProperty("smile.feature.transform", transform);
+        if (priori != null) params.setProperty("smile.rda.priori", priori);
+        if (tolerance > 0) params.setProperty("smile.rda.tolerance", String.valueOf(tolerance));
+        run();
+    }
+
+    @Command(name = "mlp", description = "Multilayer Perceptron",
+             mixinStandardHelpOptions = true)
+    void mlp(
+            @Option(names = {"--regression"}, description = "Train a regression model.")
+            boolean regression,
+            @Option(names = {"--transform"}, paramLabel = "<rule>", description = "The feature transformation <standardizer, winsor(0.01,0.99), minmax, MaxAbs, L1, L2, Linf>.")
+            String transform,
+            @Option(names = {"--layers"}, paramLabel = "<network>", required = true, description = "The neural network layers <ReLU(100)|Sigmoid(30)>.")
+            String layers,
+            @Option(names = {"--epochs"}, paramLabel = "<value>", description = "The number of training epochs.")
+            int epochs,
+            @Option(names = {"--mini-batch"}, paramLabel = "<value>", description = "The mini batch sample size.")
+            int miniBatch,
+            @Option(names = {"--learning-rate"}, paramLabel = "<value>", description = "The learning rate schedule <0.01, linear(0.01, 10000, 0.001), piecewise(...), polynomial(...), inverse(...), exp(...)>.")
+            String learningRate,
+            @Option(names = {"--momentum"}, paramLabel = "<value>", description = "The momentum schedule.")
+            String momentum,
+            @Option(names = {"--weight-decay"}, paramLabel = "<value>", description = "The weight decay.")
+            double weightDecay,
+            @Option(names = {"--clip_norm"}, paramLabel = "<value>", description = "The gradient clipping norm.")
+            double clipNorm,
+            @Option(names = {"--rho"}, paramLabel = "<value>", description = "RMSProp rho.")
+            double rho,
+            @Option(names = {"--epsilon"}, paramLabel = "<value>", description = "RMSProp epsilon.")
+            double epsilon) throws Exception {
+
+        algorithm = "mlp";
+        classification = !regression;
+        params.setProperty("smile.mlp.layers", layers);
+        if (epochs > 0) params.setProperty("smile.mlp.epochs", String.valueOf(epochs));
+        if (miniBatch > 0) params.setProperty("smile.mlp.mini_batch", String.valueOf(miniBatch));
+        if (learningRate != null) params.setProperty("smile.mlp.learning_rate", learningRate);
+        if (momentum != null) params.setProperty("smile.mlp.momentum", momentum);
+        if (weightDecay > 0) params.setProperty("smile.mlp.weight_decay", String.valueOf(weightDecay));
+        if (clipNorm > 0) params.setProperty("smile.mlp.clip_norm", String.valueOf(clipNorm));
+        if (rho > 0) params.setProperty("smile.mlp.RMSProp.rho", String.valueOf(rho));
+        if (epsilon > 0) params.setProperty("smile.mlp.RMSProp.epsilon", String.valueOf(epsilon));
+        if (transform != null) params.setProperty("smile.feature.transform", transform);
+        run();
+    }
+
+    @Command(name = "svm", description = "Support Vector Machine",
+             mixinStandardHelpOptions = true)
+    void svm(
+            @Option(names = {"--regression"}, description = "Train a regression model.")
+            boolean regression,
+            @Option(names = {"--transform"}, paramLabel = "<rule>", description = "The feature transformation <standardizer, winsor(0.01,0.99), minmax, MaxAbs, L1, L2, Linf>.")
+            String transform,
+            @Option(names = {"--kernel"}, paramLabel = "<function>", required = true, description = "The kernel function.")
+            String kernel,
+            @Option(names = {"-C"}, paramLabel = "<value>", description = "The soft margin penalty parameter.")
+            double C,
+            @Option(names = {"--epsilon"}, paramLabel = "<value>", description = "The parameter of epsilon-insensitive hinge loss.")
+            double epsilon,
+            @Option(names = {"--ovr"}, description = "One vs Rest strategy for multiclass classification.")
+            boolean ovr,
+            @Option(names = {"--ovo"}, description = "One vs One strategy for multiclass classification.")
+            boolean ovo,
+            @Option(names = {"--tolerance"}, paramLabel = "<value>", description = "The tolerance of convergence test.")
+            double tolerance) throws Exception {
+
+        algorithm = "svm";
+        classification = !regression;
+        params.setProperty("smile.svm.kernel", kernel);
+        if (transform != null) params.setProperty("smile.feature.transform", transform);
+        if (C > 0) params.setProperty("smile.svm.C", String.valueOf(C));
+        if (epsilon > 0) params.setProperty("smile.svm.epsilon", String.valueOf(epsilon));
+        if (ovr) params.setProperty("smile.svm.strategy", "ovr");
+        if (ovo) params.setProperty("smile.svm.strategy", "ovo");
+        if (tolerance > 0) params.setProperty("smile.svm.tolerance", String.valueOf(tolerance));
+        run();
+    }
+
+    @Command(name = "rbf", description = "Radial Basis Function Network",
+             mixinStandardHelpOptions = true)
+    void rbf(
+            @Option(names = {"--regression"}, description = "Train a regression model.")
+            boolean regression,
+            @Option(names = {"--transform"}, paramLabel = "<rule>", description = "The feature transformation <standardizer, winsor(0.01,0.99), minmax, MaxAbs, L1, L2, Linf>.")
+            String transform,
+            @Option(names = {"--neurons"}, paramLabel = "<value>", required = true, description = "The number of neurons (radial basis functions).")
+            int neurons,
+            @Option(names = {"--normalize"}, description = "Normalized RBF network.")
+            boolean normalize) throws Exception {
+
+        algorithm = "rbf";
+        classification = !regression;
+        params.setProperty("smile.rbf.neurons", String.valueOf(neurons));
+        params.setProperty("smile.rbf.normalize", String.valueOf(normalize));
+        if (transform != null) params.setProperty("smile.feature.transform", transform);
+        run();
+    }
+
+    @Command(name = "ols", description = "Ordinary Least Squares",
+             mixinStandardHelpOptions = true)
+    void ols(
+            @Option(names = {"--method"}, paramLabel = "<qr or svd>", description = "The fitting method <qr, svd>.")
+            String method,
+            @Option(names = {"--stderr"}, description = "Compute the standard errors of the estimate of parameters.")
+            boolean stderr,
+            @Option(names = {"--recursive"}, description = "Recursive least squares.")
+            boolean recursive) throws Exception {
+
+        algorithm = "ols";
+        classification = false;
+        params.setProperty("smile.ols.standard_error", String.valueOf(stderr));
+        params.setProperty("smile.ols.recursive", String.valueOf(recursive));
+        if (method != null) params.setProperty("smile.ols.method", method);
+        run();
+    }
+
+    @Command(name = "lasso", description = "Least Absolute Shrinkage and Selection Operator",
+             mixinStandardHelpOptions = true)
+    void lasso(
+            @Option(names = {"--lambda"}, paramLabel = "<value>", required = true, description = "The regularization on linear weights.")
+            double lambda,
+            @Option(names = {"--iterations"}, paramLabel = "<value>", description = "The maximum number of iteration.")
+            int iterations,
+            @Option(names = {"--tolerance"}, paramLabel = "<value>", description = "The tolerance to stop iterations (relative target duality gap).")
+            double tolerance) throws Exception {
+
+        algorithm = "lasso";
+        classification = false;
+        params.setProperty("smile.lasso.lambda", String.valueOf(lambda));
+        if (iterations > 0) params.setProperty("smile.lasso.iterations", String.valueOf(iterations));
+        if (tolerance > 0) params.setProperty("smile.lasso.tolerance", String.valueOf(tolerance));
+        run();
+    }
+
+    @Command(name = "ridge", description = "Ridge Regression",
+             mixinStandardHelpOptions = true)
+    void ridge(
+            @Option(names = {"--lambda"}, paramLabel = "<value>", required = true, description = "The regularization on linear weights.")
+            double lambda) throws Exception {
+
+        algorithm = "ridge";
+        classification = false;
+        params.setProperty("smile.ridge.lambda", String.valueOf(lambda));
+        run();
+    }
+
+    @Command(name = "elastic-net", description = "Least Absolute Shrinkage and Selection Operator",
+             mixinStandardHelpOptions = true)
+    void elasticNet(
+            @Option(names = {"--lambda1"}, paramLabel = "<value>", required = true, description = "The L1 regularization on linear weights.")
+            double lambda1,
+            @Option(names = {"--lambda2"}, paramLabel = "<value>", required = true, description = "The L2 regularization on linear weights.")
+            double lambda2,
+            @Option(names = {"--iterations"}, paramLabel = "<value>", description = "The maximum number of iteration.")
+            int iterations,
+            @Option(names = {"--tolerance"}, paramLabel = "<value>", description = "The tolerance to stop iterations (relative target duality gap).")
+            double tolerance) throws Exception {
+
+        algorithm = "elastic-net";
+        classification = false;
+        params.setProperty("smile.elastic_net.lambda1", String.valueOf(lambda1));
+        params.setProperty("smile.elastic_net.lambda2", String.valueOf(lambda2));
+        if (iterations > 0) params.setProperty("smile.elastic_net.iterations", String.valueOf(iterations));
+        if (tolerance > 0) params.setProperty("smile.elastic_net.tolerance", String.valueOf(tolerance));
+        run();
+    }
+
+    @Command(name = "gaussian-process", description = "Gaussian Process Regression",
+             mixinStandardHelpOptions = true)
+    void gaussianProcess(
+            @Option(names = {"--transform"}, paramLabel = "<rule>", description = "The feature transformation <standardizer, winsor(0.01,0.99), minmax, MaxAbs, L1, L2, Linf>.")
+            String transform,
+            @Option(names = {"--kernel"}, paramLabel = "<function>", required = true, description = "The kernel function.")
+            String kernel,
+            @Option(names = {"--noise"}, paramLabel = "<value>", required = true, description = "The noise variance.")
+            double noise,
+            @Option(names = {"--normalize"}, description = "Normalize the response variable.")
+            boolean normalize,
+            @Option(names = {"--iterations"}, paramLabel = "<value>", description = "The maximum number of HPO iterations.")
+            int iterations,
+            @Option(names = {"--tolerance"}, paramLabel = "<value>", description = "The stopping tolerance for HPO.")
+            double tolerance) throws Exception {
+
+        algorithm = "gaussian-process";
+        classification = false;
+        params.setProperty("smile.gaussian_process.kernel", kernel);
+        params.setProperty("smile.gaussian_process.noise", String.valueOf(noise));
+        params.setProperty("smile.gaussian_process.normalize", String.valueOf(normalize));
+        if (transform != null) params.setProperty("smile.feature.transform", transform);
+        if (iterations > 0) params.setProperty("smile.gaussian_process.iterations", String.valueOf(iterations));
+        if (tolerance > 0) params.setProperty("smile.gaussian_process.tolerance", String.valueOf(tolerance));
+        run();
+    }
+
+    @Command(name = "kmeans", description = "K-Means Clustering",
+             mixinStandardHelpOptions = true)
+    void kmeans(
+            @Option(names = {"--transform"}, paramLabel = "<rule>", description = "The feature transformation <standardizer, winsor(0.01,0.99), minmax, MaxAbs, L1, L2, Linf>.")
+            String transform,
+            @Option(names = {"-k", "--clusters"}, paramLabel = "<k>", required = true, description = "The number of clusters.")
+            int k,
+            @Option(names = {"--iterations"}, paramLabel = "<value>", description = "The maximum number of iterations.")
+            int iterations,
+            @Option(names = {"--tolerance"}, paramLabel = "<value>", description = "The tolerance of convergence test.")
+            double tolerance,
+            @Option(names = {"--runs"}, paramLabel = "<value>", description = "The number of runs to pick the best clustering.")
+            int runs) throws Exception {
+
+        algorithm = "kmeans";
+        clustering = true;
+        params.setProperty("smile.clustering.k", String.valueOf(k));
+        if (transform != null) params.setProperty("smile.feature.transform", transform);
+        if (iterations > 0) params.setProperty("smile.clustering.iterations", String.valueOf(iterations));
+        if (tolerance > 0) params.setProperty("smile.clustering.tolerance", String.valueOf(tolerance));
+        if (runs > 0) params.setProperty("smile.clustering.runs", String.valueOf(runs));
+        run();
+    }
+
+    @Command(name = "xmeans", description = "X-Means Clustering",
+             mixinStandardHelpOptions = true)
+    void xmeans(
+            @Option(names = {"--transform"}, paramLabel = "<rule>", description = "The feature transformation <standardizer, winsor(0.01,0.99), minmax, MaxAbs, L1, L2, Linf>.")
+            String transform,
+            @Option(names = {"-k", "--clusters"}, paramLabel = "<kmax>", required = true, description = "The maximum number of clusters.")
+            int kmax,
+            @Option(names = {"--iterations"}, paramLabel = "<value>", description = "The maximum number of iterations.")
+            int iterations,
+            @Option(names = {"--tolerance"}, paramLabel = "<value>", description = "The tolerance of convergence test.")
+            double tolerance) throws Exception {
+
+        algorithm = "xmeans";
+        clustering = true;
+        params.setProperty("smile.clustering.k", String.valueOf(kmax));
+        if (transform != null) params.setProperty("smile.feature.transform", transform);
+        if (iterations > 0) params.setProperty("smile.clustering.iterations", String.valueOf(iterations));
+        if (tolerance > 0) params.setProperty("smile.clustering.tolerance", String.valueOf(tolerance));
+        run();
+    }
+
+    @Command(name = "gmeans", description = "G-Means Clustering",
+             mixinStandardHelpOptions = true)
+    void gmeans(
+            @Option(names = {"--transform"}, paramLabel = "<rule>", description = "The feature transformation <standardizer, winsor(0.01,0.99), minmax, MaxAbs, L1, L2, Linf>.")
+            String transform,
+            @Option(names = {"-k", "--clusters"}, paramLabel = "<kmax>", required = true, description = "The maximum number of clusters.")
+            int kmax,
+            @Option(names = {"--iterations"}, paramLabel = "<value>", description = "The maximum number of iterations.")
+            int iterations,
+            @Option(names = {"--tolerance"}, paramLabel = "<value>", description = "The tolerance of convergence test.")
+            double tolerance) throws Exception {
+
+        algorithm = "gmeans";
+        clustering = true;
+        params.setProperty("smile.clustering.k", String.valueOf(kmax));
+        if (transform != null) params.setProperty("smile.feature.transform", transform);
+        if (iterations > 0) params.setProperty("smile.clustering.iterations", String.valueOf(iterations));
+        if (tolerance > 0) params.setProperty("smile.clustering.tolerance", String.valueOf(tolerance));
+        run();
+    }
+
+    @Command(name = "deterministic-annealing", aliases = {"da"}, description = "Deterministic Annealing Clustering",
+             mixinStandardHelpOptions = true)
+    void deterministicAnnealing(
+            @Option(names = {"--transform"}, paramLabel = "<rule>", description = "The feature transformation <standardizer, winsor(0.01,0.99), minmax, MaxAbs, L1, L2, Linf>.")
+            String transform,
+            @Option(names = {"-k", "--clusters"}, paramLabel = "<kmax>", required = true, description = "The maximum number of clusters.")
+            int kmax,
+            @Option(names = {"--alpha"}, paramLabel = "<value>", description = "The temperature decreasing factor in (0, 1).")
+            double alpha,
+            @Option(names = {"--iterations"}, paramLabel = "<value>", description = "The maximum number of iterations at each temperature.")
+            int iterations,
+            @Option(names = {"--tolerance"}, paramLabel = "<value>", description = "The tolerance of convergence test.")
+            double tolerance,
+            @Option(names = {"--split-tolerance"}, paramLabel = "<value>", description = "The tolerance to split a cluster.")
+            double splitTolerance) throws Exception {
+
+        algorithm = "deterministic-annealing";
+        clustering = true;
+        params.setProperty("smile.deterministic_annealing.k", String.valueOf(kmax));
+        if (transform != null) params.setProperty("smile.feature.transform", transform);
+        if (alpha > 0) params.setProperty("smile.deterministic_annealing.alpha", String.valueOf(alpha));
+        if (iterations > 0) params.setProperty("smile.deterministic_annealing.iterations", String.valueOf(iterations));
+        if (tolerance > 0) params.setProperty("smile.deterministic_annealing.tolerance", String.valueOf(tolerance));
+        if (splitTolerance > 0) params.setProperty("smile.deterministic_annealing.split_tolerance", String.valueOf(splitTolerance));
+        run();
+    }
+
+    @Command(name = "som", description = "Self-Organizing Map",
+             mixinStandardHelpOptions = true)
+    void som(
+            @Option(names = {"--transform"}, paramLabel = "<rule>", description = "The feature transformation <standardizer, winsor(0.01,0.99), minmax, MaxAbs, L1, L2, Linf>.")
+            String transform,
+            @Option(names = {"--nrow"}, paramLabel = "<rows>", description = "The number of rows in the SOM lattice.")
+            int nrow,
+            @Option(names = {"--ncol"}, paramLabel = "<cols>", description = "The number of columns in the SOM lattice.")
+            int ncol,
+            @Option(names = {"--epochs"}, paramLabel = "<value>", description = "The number of training epochs.")
+            int epochs,
+            @Option(names = {"--alpha"}, paramLabel = "<schedule>", description = "The learning rate schedule.")
+            String alpha,
+            @Option(names = {"--neighborhood"}, paramLabel = "<function>", description = "The neighborhood function <Gaussian(sigma, T), bubble(r), square(w), triangle(sigma, T), MexicanHat(sigma, T)>.")
+            String neighborhood) throws Exception {
+
+        algorithm = "som";
+        quantizer = true;
+        if (transform != null) params.setProperty("smile.feature.transform", transform);
+        if (nrow > 0) params.setProperty("smile.som.nrow", String.valueOf(nrow));
+        if (ncol > 0) params.setProperty("smile.som.ncol", String.valueOf(ncol));
+        if (epochs > 0) params.setProperty("smile.som.epochs", String.valueOf(epochs));
+        if (alpha != null) params.setProperty("smile.som.alpha", alpha);
+        if (neighborhood != null) params.setProperty("smile.som.neighborhood", neighborhood);
+        run();
+    }
+
+    @Command(name = "neural-gas", description = "Neural Gas",
+             mixinStandardHelpOptions = true)
+    void neuralGas(
+            @Option(names = {"--transform"}, paramLabel = "<rule>", description = "The feature transformation <standardizer, winsor(0.01,0.99), minmax, MaxAbs, L1, L2, Linf>.")
+            String transform,
+            @Option(names = {"-k", "--neurons"}, paramLabel = "<k>", description = "The number of neurons.")
+            int k,
+            @Option(names = {"--epochs"}, paramLabel = "<value>", description = "The number of training epochs.")
+            int epochs,
+            @Option(names = {"--alpha"}, paramLabel = "<schedule>", description = "The learning rate schedule.")
+            String alpha,
+            @Option(names = {"--theta"}, paramLabel = "<schedule>", description = "The neighborhood decay schedule.")
+            String theta,
+            @Option(names = {"--lifetime"}, paramLabel = "<schedule>", description = "The connection lifetime schedule.")
+            String lifetime) throws Exception {
+
+        algorithm = "neural-gas";
+        quantizer = true;
+        if (transform != null) params.setProperty("smile.feature.transform", transform);
+        if (k > 0) params.setProperty("smile.neural_gas.k", String.valueOf(k));
+        if (epochs > 0) params.setProperty("smile.neural_gas.epochs", String.valueOf(epochs));
+        if (alpha != null) params.setProperty("smile.neural_gas.alpha", alpha);
+        if (theta != null) params.setProperty("smile.neural_gas.theta", theta);
+        if (lifetime != null) params.setProperty("smile.neural_gas.lifetime", lifetime);
+        run();
+    }
+
+    @Command(name = "growing-neural-gas", aliases = {"gng"}, description = "Growing Neural Gas",
+             mixinStandardHelpOptions = true)
+    void growingNeuralGas(
+            @Option(names = {"--transform"}, paramLabel = "<rule>", description = "The feature transformation <standardizer, winsor(0.01,0.99), minmax, MaxAbs, L1, L2, Linf>.")
+            String transform,
+            @Option(names = {"--epochs"}, paramLabel = "<value>", description = "The number of training epochs.")
+            int epochs,
+            @Option(names = {"--eps-best"}, paramLabel = "<value>", description = "The learning rate for the best matching neuron.")
+            double epsBest,
+            @Option(names = {"--eps-neighbor"}, paramLabel = "<value>", description = "The learning rate for topological neighbors.")
+            double epsNeighbor,
+            @Option(names = {"--edge-lifetime"}, paramLabel = "<value>", description = "The maximum age of edges.")
+            int edgeLifetime,
+            @Option(names = {"--lambda"}, paramLabel = "<value>", description = "The step interval to insert a new neuron.")
+            int lambda,
+            @Option(names = {"--alpha"}, paramLabel = "<value>", description = "The error reduction factor when splitting.")
+            double alpha,
+            @Option(names = {"--beta"}, paramLabel = "<value>", description = "The global error decay factor per step.")
+            double beta) throws Exception {
+
+        algorithm = "growing-neural-gas";
+        quantizer = true;
+        if (transform != null) params.setProperty("smile.feature.transform", transform);
+        if (epochs > 0) params.setProperty("smile.gng.epochs", String.valueOf(epochs));
+        if (epsBest > 0) params.setProperty("smile.gng.eps_best", String.valueOf(epsBest));
+        if (epsNeighbor > 0) params.setProperty("smile.gng.eps_neighbor", String.valueOf(epsNeighbor));
+        if (edgeLifetime > 0) params.setProperty("smile.gng.edge_lifetime", String.valueOf(edgeLifetime));
+        if (lambda > 0) params.setProperty("smile.gng.lambda", String.valueOf(lambda));
+        if (alpha > 0) params.setProperty("smile.gng.alpha", String.valueOf(alpha));
+        if (beta > 0) params.setProperty("smile.gng.beta", String.valueOf(beta));
+        run();
+    }
+
+    @Command(name = "neural-map", description = "NeuralMap Competitive Learning",
+             mixinStandardHelpOptions = true)
+    void neuralMap(
+            @Option(names = {"--transform"}, paramLabel = "<rule>", description = "The feature transformation <standardizer, winsor(0.01,0.99), minmax, MaxAbs, L1, L2, Linf>.")
+            String transform,
+            @Option(names = {"--radius"}, paramLabel = "<value>", required = true, description = "The distance threshold to activate the nearest neuron.")
+            double radius,
+            @Option(names = {"--epochs"}, paramLabel = "<value>", description = "The number of training epochs.")
+            int epochs,
+            @Option(names = {"--eps-best"}, paramLabel = "<value>", description = "The learning rate for the activated neuron.")
+            double epsBest,
+            @Option(names = {"--eps-neighbor"}, paramLabel = "<value>", description = "The learning rate for neighbors.")
+            double epsNeighbor,
+            @Option(names = {"--edge-lifetime"}, paramLabel = "<value>", description = "The maximum age of edges.")
+            int edgeLifetime,
+            @Option(names = {"--beta"}, paramLabel = "<value>", description = "The freshness decay factor.")
+            double beta) throws Exception {
+
+        algorithm = "neural-map";
+        quantizer = true;
+        params.setProperty("smile.neural_map.radius", String.valueOf(radius));
+        if (transform != null) params.setProperty("smile.feature.transform", transform);
+        if (epochs > 0) params.setProperty("smile.neural_map.epochs", String.valueOf(epochs));
+        if (epsBest > 0) params.setProperty("smile.neural_map.eps_best", String.valueOf(epsBest));
+        if (epsNeighbor > 0) params.setProperty("smile.neural_map.eps_neighbor", String.valueOf(epsNeighbor));
+        if (edgeLifetime > 0) params.setProperty("smile.neural_map.edge_lifetime", String.valueOf(edgeLifetime));
+        if (beta > 0) params.setProperty("smile.neural_map.beta", String.valueOf(beta));
+        run();
+    }
+
+    @Command(name = "birch", description = "BIRCH Hierarchical Clustering / Quantization",
+             mixinStandardHelpOptions = true)
+    void birch(
+            @Option(names = {"--transform"}, paramLabel = "<rule>", description = "The feature transformation <standardizer, winsor(0.01,0.99), minmax, MaxAbs, L1, L2, Linf>.")
+            String transform,
+            @Option(names = {"--branching"}, paramLabel = "<B>", description = "The branching factor of non-leaf nodes.")
+            int branching,
+            @Option(names = {"--leaves"}, paramLabel = "<L>", description = "The maximum number of entries in leaf nodes.")
+            int leaves,
+            @Option(names = {"--radius"}, paramLabel = "<T>", required = true, description = "The maximum radius of a sub-cluster.")
+            double radius) throws Exception {
+
+        algorithm = "birch";
+        quantizer = true;
+        params.setProperty("smile.birch.radius", String.valueOf(radius));
+        if (transform != null) params.setProperty("smile.feature.transform", transform);
+        if (branching > 0) params.setProperty("smile.birch.branching", String.valueOf(branching));
+        if (leaves > 0) params.setProperty("smile.birch.leaves", String.valueOf(leaves));
+        run();
+    }
+
+    @Command(name = "isolation-forest", aliases = {"iforest"}, description = "Isolation Forest Anomaly Detection",
+             mixinStandardHelpOptions = true)
+    void isolationForest(
+            @Option(names = {"--transform"}, paramLabel = "<rule>", description = "The feature transformation <standardizer, winsor(0.01,0.99), minmax, MaxAbs, L1, L2, Linf>.")
+            String transform,
+            @Option(names = {"--trees"}, paramLabel = "<trees>", description = "The number of isolation trees.")
+            int trees,
+            @Option(names = {"--max-depth"}, paramLabel = "<depth>", description = "The maximum tree depth.")
+            int maxDepth,
+            @Option(names = {"--sampling"}, paramLabel = "<rate>", description = "The subsampling rate in (0, 1).")
+            double sampling,
+            @Option(names = {"--extension-level"}, paramLabel = "<level>", description = "The Extended Isolation Forest extension level (0 for standard Isolation Forest).")
+            int extensionLevel,
+            @Option(names = {"--threshold"}, paramLabel = "<score>", description = "The anomaly score threshold in (0, 1] (default 0.5).")
+            Double threshold) throws Exception {
+
+        algorithm = "isolation-forest";
+        anomaly = true;
+        if (transform != null) params.setProperty("smile.feature.transform", transform);
+        if (trees > 0) params.setProperty("smile.isolation_forest.trees", String.valueOf(trees));
+        if (maxDepth > 0) params.setProperty("smile.isolation_forest.max_depth", String.valueOf(maxDepth));
+        if (sampling > 0) params.setProperty("smile.isolation_forest.sampling_rate", String.valueOf(sampling));
+        if (extensionLevel > 0) params.setProperty("smile.isolation_forest.extension_level", String.valueOf(extensionLevel));
+        if (threshold != null) params.setProperty("smile.anomaly.threshold", String.valueOf(threshold));
+        run();
+    }
+
+    @Command(name = "lof", description = "Local Outlier Factor (LOF) Anomaly Detection",
+             mixinStandardHelpOptions = true)
+    void lof(
+            @Option(names = {"--transform"}, paramLabel = "<rule>", description = "The feature transformation <standardizer, winsor(0.01,0.99), minmax, MaxAbs, L1, L2, Linf>.")
+            String transform,
+            @Option(names = {"-k", "--neighbors"}, paramLabel = "<k>", description = "The number of nearest neighbors.")
+            int k,
+            @Option(names = {"--threshold"}, paramLabel = "<score>", description = "The LOF anomaly score threshold (default 1.5).")
+            Double threshold) throws Exception {
+
+        algorithm = "lof";
+        anomaly = true;
+        if (transform != null) params.setProperty("smile.feature.transform", transform);
+        if (k > 0) params.setProperty("smile.lof.k", String.valueOf(k));
+        if (threshold != null) params.setProperty("smile.anomaly.threshold", String.valueOf(threshold));
+        run();
+    }
+
+    @Command(name = "ocsvm", aliases = {"one-class-svm"}, description = "One-Class SVM Anomaly / Novelty Detection",
+             mixinStandardHelpOptions = true)
+    void ocsvm(
+            @Option(names = {"--transform"}, paramLabel = "<rule>", description = "The feature transformation <standardizer, winsor(0.01,0.99), minmax, MaxAbs, L1, L2, Linf>.")
+            String transform,
+            @Option(names = {"--kernel"}, paramLabel = "<function>", required = true, description = "The kernel function.")
+            String kernel,
+            @Option(names = {"--nu"}, paramLabel = "<value>", description = "Upper bound on the fraction of outliers in (0, 1].")
+            double nu,
+            @Option(names = {"--tolerance"}, paramLabel = "<value>", description = "The tolerance of convergence test.")
+            double tolerance,
+            @Option(names = {"--threshold"}, paramLabel = "<score>", description = "The decision function threshold below which a sample is flagged as an anomaly (default 0.0).")
+            Double threshold) throws Exception {
+
+        algorithm = "ocsvm";
+        anomaly = true;
+        params.setProperty("smile.svm.kernel", kernel);
+        if (transform != null) params.setProperty("smile.feature.transform", transform);
+        if (nu > 0) params.setProperty("smile.svm.nu", String.valueOf(nu));
+        if (tolerance > 0) params.setProperty("smile.svm.tolerance", String.valueOf(tolerance));
+        if (threshold != null) params.setProperty("smile.anomaly.threshold", String.valueOf(threshold));
+        run();
+    }
+}

@@ -1,0 +1,268 @@
+/*
+ * Copyright (c) 2010-2026 Haifeng Li. All rights reserved.
+ *
+ * SMILE Serve is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Affero General Public License as
+ * published by the Free Software Foundation, either version 3 of the
+ * License, or (at your option) any later version.
+ *
+ * SMILE Serve is distributed in the hope that it will be useful, but
+ * WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+ * Affero General Public License for more details.
+ *
+ * You should have received a copy of the GNU Affero General Public
+ * License along with SMILE Serve. If not, see
+ * <https://www.gnu.org/licenses/>.
+ */
+import React, { useRef } from "react";
+
+/**
+ * Returns true when {@code value} is a non-empty form field value.
+ */
+function hasFieldValue(value) {
+  if (value == null || value === "") {
+    return false;
+  }
+  if (typeof value === "number") {
+    return !Number.isNaN(value);
+  }
+  if (typeof value === "boolean") {
+    return true;
+  }
+  if (Array.isArray(value)) {
+    return value.length > 0;
+  }
+  if (typeof value === "object") {
+    return Object.values(value).some(hasFieldValue);
+  }
+  return String(value).trim().length > 0;
+}
+
+/**
+ * Returns true when every mandatory (schema {@code required}) field has a value.
+ *
+ * @param {object|null} formData current RJSF form data
+ * @param {object|null} schema JSON Schema with optional {@code required} array
+ */
+export function formHasRequiredValues(formData, schema) {
+  const required = Array.isArray(schema?.required) ? schema.required : [];
+  if (required.length === 0) {
+    // No mandatory fields — treat as ready only if something was entered.
+    if (formData == null || typeof formData !== "object") {
+      return false;
+    }
+    return Object.values(formData).some(hasFieldValue);
+  }
+  if (formData == null || typeof formData !== "object") {
+    return false;
+  }
+  return required.every((key) => hasFieldValue(formData[key]));
+}
+
+/**
+ * Shared footer for SMILE / ONNX numeric forms: optional batch file + one
+ * primary action. File selected → Run (batch); otherwise Submit (form).
+ *
+ * Must be rendered as a child of {@code @rjsf/core} {@code Form} so the
+ * Submit button can use {@code type="submit"}.
+ */
+export default function InferActionFooter({
+  file,
+  onFileChange,
+  onClearFile,
+  onRunFile,
+  formData = null,
+  schema = null,
+  streaming = false,
+  streamCount = 0,
+  onStop,
+  disabled = false,
+  batchHint,
+  explain = false,
+  onExplainChange = null,
+  shapMethod = "SHAP",
+  shapSamples = "",
+  onShapSamplesChange = null,
+  shapRidge = "",
+  onShapRidgeChange = null,
+  onlineMode = false,
+  onOnlineModeChange = null,
+  persistUpdate = false,
+  onPersistUpdateChange = null,
+}) {
+  const fileMode = Boolean(file);
+  const inputRef = useRef(null);
+  const canSubmit = formHasRequiredValues(formData, schema);
+  const isKernelShap = shapMethod === "KernelSHAP";
+
+  const clearFile = () => {
+    if (inputRef.current) {
+      inputRef.current.value = "";
+    }
+    onClearFile();
+  };
+
+  return (
+    <div className="infer-action-footer">
+      <div className="infer-batch">
+        <h3>Batch from file</h3>
+        <p className="infer-hint">{batchHint}</p>
+        <label className="infer-file-label">
+          <span>CSV or JSON file</span>
+          <input
+            ref={inputRef}
+            type="file"
+            accept=".csv,.json,.jsonl,text/csv,application/json"
+            onChange={(e) => onFileChange(e.target.files?.[0] || null)}
+            disabled={disabled || streaming}
+          />
+        </label>
+        {file && (
+          <div className="infer-file-row">
+            <p className="infer-file-name">
+              {file.name}{" "}
+              <span className="infer-muted">
+                ({Math.max(1, Math.round(file.size / 1024))} KB)
+              </span>
+            </p>
+            <button
+              type="button"
+              className="infer-btn"
+              onClick={clearFile}
+              disabled={streaming}
+            >
+              Clear file
+            </button>
+          </div>
+        )}
+      </div>
+
+      <div className="infer-primary-actions">
+        {(onExplainChange || onOnlineModeChange) && (
+          <div className="infer-explain-controls">
+            {onOnlineModeChange && (
+              <>
+                <label
+                  className="infer-explain-toggle"
+                  title="Update model online with submitted data instead of running inference"
+                >
+                  <input
+                    type="checkbox"
+                    checked={onlineMode}
+                    onChange={(e) => onOnlineModeChange(e.target.checked)}
+                    disabled={disabled || streaming}
+                  />
+                  <span>Online Update</span>
+                </label>
+                {onlineMode && onPersistUpdateChange && (
+                  <label
+                    className="infer-explain-toggle"
+                    title="Persist updated model state back to its .sml file on disk"
+                  >
+                    <input
+                      type="checkbox"
+                      checked={persistUpdate}
+                      onChange={(e) => onPersistUpdateChange(e.target.checked)}
+                      disabled={disabled || streaming}
+                    />
+                    <span>Persist to disk</span>
+                  </label>
+                )}
+              </>
+            )}
+            {!onlineMode && onExplainChange && (
+              <>
+                <label
+                  className="infer-explain-toggle"
+                  title={`Compute SHAP feature explanations (${shapMethod})`}
+                >
+                  <input
+                    type="checkbox"
+                    checked={explain}
+                    onChange={(e) => onExplainChange(e.target.checked)}
+                    disabled={disabled || streaming}
+                  />
+                  <span>Explain ({shapMethod})</span>
+                </label>
+
+                {explain && isKernelShap && (onShapSamplesChange || onShapRidgeChange) && (
+                  <div className="infer-kernel-shap-options">
+                    {onShapSamplesChange && (
+                      <label
+                        className="infer-shap-param"
+                        title="Maximum number of coalitions to evaluate per instance (0 or blank = auto: 2M + 2048)"
+                      >
+                        <span>Samples</span>
+                        <input
+                          type="number"
+                          min="0"
+                          step="1"
+                          placeholder="Auto"
+                          value={shapSamples}
+                          onChange={(e) => onShapSamplesChange(e.target.value)}
+                          disabled={disabled || streaming}
+                        />
+                      </label>
+                    )}
+                    {onShapRidgeChange && (
+                      <label
+                        className="infer-shap-param"
+                        title="L2 ridge regularization parameter for numerical stability (default: 1e-8)"
+                      >
+                        <span>Ridge</span>
+                        <input
+                          type="number"
+                          min="0"
+                          step="any"
+                          placeholder="1e-8"
+                          value={shapRidge}
+                          onChange={(e) => onShapRidgeChange(e.target.value)}
+                          disabled={disabled || streaming}
+                        />
+                      </label>
+                    )}
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+        )}
+
+        <div className="infer-action-row">
+          {fileMode ? (
+            <button
+              type="button"
+              className="infer-btn-run"
+              title={`Using ${file.name}`}
+              onClick={onRunFile}
+              disabled={disabled || streaming}
+            >
+              {streaming
+                ? onlineMode
+                  ? "Updating…"
+                  : `Streaming… (${streamCount})`
+                : onlineMode
+                ? "Update from File"
+                : "Run"}
+            </button>
+          ) : (
+            <button
+              type="submit"
+              className="infer-submit"
+              title="Using form"
+              disabled={disabled || streaming || !canSubmit}
+            >
+              {onlineMode ? "Update Model" : "Submit"}
+            </button>
+          )}
+          {streaming && (
+            <button type="button" className="infer-btn" onClick={onStop}>
+              Stop
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
